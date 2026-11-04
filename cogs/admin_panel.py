@@ -40,6 +40,124 @@ def build_admin_embed(member: discord.Member, data: dict, emoji_str: str) -> dis
     return embed
 
 
+async def build_pt_picker_embed(target: discord.Member, current_slot: str | None) -> discord.Embed:
+    supports = await get_all_supports()
+    counts = {s: 0 for s in ALL_SLOTS}
+    for s in supports:
+        pt = s.get("prime_time")
+        if pt in counts:
+            counts[pt] += 1
+
+    embed = discord.Embed(
+        title=f"🕒 Назначение прайм-тайма — {target.display_name}",
+        description=(
+            f"Саппорт: {target.mention}\n"
+            f"Текущий прайм-тайм: **`{current_slot or 'Не назначен'}`**\n\n"
+            "Выберите нужный часовой слот в меню ниже (в скобках указано, сколько саппортов уже стоит на этом времени):"
+        ),
+        color=0x5865F2
+    )
+    embed.set_thumbnail(url=target.display_avatar.url)
+    return embed
+
+
+class SlotSelect(discord.ui.Select):
+    def __init__(self, target: discord.Member, slots_slice: list[str], placeholder: str, counts: dict[str, int], current_slot: str | None, parent_panel: "AdminPanelView | None" = None):
+        self.target = target
+        self.parent_panel = parent_panel
+        options = []
+        for slot in slots_slice:
+            cnt = counts.get(slot, 0)
+            desc = f"Занято мест: {cnt}" if cnt > 0 else "Свободно (0 чел.)"
+            options.append(
+                discord.SelectOption(
+                    label=slot,
+                    value=slot,
+                    description=desc,
+                    emoji="🕒",
+                    default=(slot == current_slot)
+                )
+            )
+        super().__init__(placeholder=placeholder, min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        chosen_slot = self.values[0]
+        await ensure_support(self.target.id)
+        await update_support_field(self.target.id, "prime_time", chosen_slot)
+        await send_log(
+            interaction.client,
+            "primes",
+            f"🕒 {interaction.user.mention} установил прайм-тайм `{chosen_slot}` для {self.target.mention}."
+        )
+
+        supports = await get_all_supports()
+        counts = {s: 0 for s in ALL_SLOTS}
+        for s in supports:
+            if s.get("prime_time") in counts:
+                counts[s["prime_time"]] += 1
+
+        new_view = PrimeTimePickerView(self.target, counts, chosen_slot, self.parent_panel)
+        new_embed = await build_pt_picker_embed(self.target, chosen_slot)
+        await interaction.response.edit_message(
+            content=f"✅ Прайм-тайм для {self.target.mention} успешно изменён на **`{chosen_slot}`**!",
+            embed=new_embed,
+            view=new_view
+        )
+
+
+class PrimeTimePickerView(discord.ui.View):
+    '''Интерактивная панель выбора прайм-тайма в 1 клик (00:00-12:00 и 12:00-00:00)'''
+    def __init__(self, target: discord.Member, counts: dict[str, int], current_slot: str | None, parent_panel: "AdminPanelView | None" = None):
+        super().__init__(timeout=600)
+        self.target = target
+        self.parent_panel = parent_panel
+
+        morning_slots = ALL_SLOTS[:12]   # 0:00-1:00 ... 11:00-12:00
+        evening_slots = ALL_SLOTS[12:]   # 12:00-13:00 ... 23:00-0:00
+
+        self.add_item(SlotSelect(
+            target, morning_slots,
+            "🌙 Ночь / Утро (00:00 — 12:00)",
+            counts, current_slot, parent_panel
+        ))
+        self.add_item(SlotSelect(
+            target, evening_slots,
+            "☀️ День / Вечер (12:00 — 00:00)",
+            counts, current_slot, parent_panel
+        ))
+
+    @discord.ui.button(label="Снять прайм-тайм", style=discord.ButtonStyle.danger, emoji="🗑️", row=2)
+    async def clear_pt_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await ensure_support(self.target.id)
+        await update_support_field(self.target.id, "prime_time", None)
+        await send_log(
+            interaction.client,
+            "primes",
+            f"🗑️ {interaction.user.mention} снял прайм-тайм у {self.target.mention}."
+        )
+        supports = await get_all_supports()
+        counts = {s: 0 for s in ALL_SLOTS}
+        for s in supports:
+            if s.get("prime_time") in counts:
+                counts[s["prime_time"]] += 1
+
+        new_view = PrimeTimePickerView(self.target, counts, None, self.parent_panel)
+        new_embed = await build_pt_picker_embed(self.target, None)
+        await interaction.response.edit_message(
+            content=f"🗑️ Прайм-тайм у {self.target.mention} удалён.",
+            embed=new_embed,
+            view=new_view
+        )
+
+    @discord.ui.button(label="⬅️ В админ-панель", style=discord.ButtonStyle.secondary, row=2)
+    async def back_to_admin_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        data = await ensure_support(self.target.id)
+        view = AdminPanelView(self.target, data)
+        em = resolve_token_emoji(interaction.client)
+        embed = build_admin_embed(self.target, data, em)
+        await interaction.response.edit_message(content=None, embed=embed, view=view)
+
+
 class HireDateModal(discord.ui.Modal, title="Изменить дату принятия"):
     date_input = discord.ui.TextInput(
         label="Дата принятия (ДД.ММ.ГГГГ)",
@@ -156,6 +274,19 @@ class AdminPanelView(discord.ui.View):
         else:
             await interaction.response.send_modal(VacationModal(self.target, self))
 
+    @discord.ui.button(label="🕒 Прайм-тайм", style=discord.ButtonStyle.primary, row=1)
+    async def pt_picker_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        data = await ensure_support(self.target.id)
+        supports = await get_all_supports()
+        counts = {s: 0 for s in ALL_SLOTS}
+        for s in supports:
+            if s.get("prime_time") in counts:
+                counts[s["prime_time"]] += 1
+
+        picker_view = PrimeTimePickerView(self.target, counts, data.get("prime_time"), self)
+        picker_embed = await build_pt_picker_embed(self.target, data.get("prime_time"))
+        await interaction.response.edit_message(embed=picker_embed, view=picker_view)
+
     @discord.ui.button(label="Удалить из БД", style=discord.ButtonStyle.danger, row=1)
     async def delete_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await delete_support(self.target.id)
@@ -239,26 +370,21 @@ class AdminCommands(commands.Cog):
             ephemeral=True
         )
 
-    # --- РАБОТА С ПРАЙМ-ТАЙМАМИ ---
-    @prime_group.command(name="set", description="Назначить или сменить прайм-тайм саппорту")
-    @app_commands.describe(саппорт="Саппорт", время="Например 20:00-21:00")
+    # --- РАБОТА С ПРАЙМ-ТАЙМАМИ (Интерактивная панель выбора) ---
+    @prime_group.command(name="set", description="Открыть удобную панель назначения прайм-тайма саппорту")
+    @app_commands.describe(саппорт="Выберите саппорта, которому нужно поставить ПТ")
     @app_commands.default_permissions(manage_guild=True)
-    async def prime_set(self, interaction: discord.Interaction, саппорт: discord.Member, время: str):
-        время = время.strip()
-        if время not in ALL_SLOTS:
-            return await interaction.response.send_message(
-                f"❌ Неверный формат слота! Пример: `20:00-21:00`", ephemeral=True
-            )
-        await ensure_support(саппорт.id)
-        await update_support_field(саппорт.id, "prime_time", время)
-        await send_log(
-            self.bot,
-            "primes",
-            f"🕒 {interaction.user.mention} установил прайм-тайм `{время}` для {саппорт.mention}."
-        )
-        await interaction.response.send_message(
-            f"✅ Прайм-тайм для {саппорт.mention} установлен на `{время}`.", ephemeral=True
-        )
+    async def prime_set(self, interaction: discord.Interaction, саппорт: discord.Member):
+        data = await ensure_support(саппорт.id)
+        supports = await get_all_supports()
+        counts = {s: 0 for s in ALL_SLOTS}
+        for s in supports:
+            if s.get("prime_time") in counts:
+                counts[s["prime_time"]] += 1
+
+        view = PrimeTimePickerView(саппорт, counts, data.get("prime_time"))
+        embed = await build_pt_picker_embed(саппорт, data.get("prime_time"))
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
     @prime_group.command(name="remove", description="Удалить прайм-тайм у саппорта")
     @app_commands.describe(саппорт="Саппорт")

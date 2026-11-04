@@ -19,9 +19,6 @@ async def get_bound_log_channel(bot: discord.Client) -> discord.TextChannel | No
     return ch if isinstance(ch, discord.TextChannel) else None
 
 async def ensure_all_log_threads(bot: discord.Client, channel: discord.TextChannel) -> dict[str, discord.Thread]:
-    '''
-    Привязывает канал #логи и автоматически находит или создаёт все 9 веток внутри него.
-    '''
     await set_setting("log_channel_id", str(channel.id))
 
     existing_by_name: dict[str, discord.Thread] = {}
@@ -76,7 +73,6 @@ async def get_or_create_thread(bot: discord.Client, category: str) -> discord.Th
                     pass
             return th
 
-    # Если ветка не найдена или была удалена — создаём её в привязанном канале #логи
     channel = await get_bound_log_channel(bot)
     if not channel:
         return None

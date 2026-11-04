@@ -15,28 +15,33 @@ from utils.profile_card import generate_profile_image
 from utils.logger import send_log, resolve_token_emoji
 
 
-class ExtraPTModal(discord.ui.Modal, title="Взять дополнительный ПТ"):
-    slot_input = discord.ui.TextInput(
-        label="Укажите часовой слот (например 18:00-19:00)",
-        placeholder="18:00-19:00",
-        required=True
-    )
+class ExtraPTSelect(discord.ui.Select):
+    def __init__(self, slots_slice: list[str], placeholder: str):
+        options = [
+            discord.SelectOption(label=slot, value=slot, emoji="⚡")
+            for slot in slots_slice
+        ]
+        super().__init__(placeholder=placeholder, min_values=1, max_values=1, options=options)
 
-    async def on_submit(self, interaction: discord.Interaction):
-        slot = self.slot_input.value.strip()
-        if slot not in ALL_SLOTS:
-            return await interaction.response.send_message(
-                "❌ Неверный слот! Пример: `18:00-19:00`", ephemeral=True
-            )
+    async def callback(self, interaction: discord.Interaction):
+        slot = self.values[0]
         await add_activity_minutes(interaction.user.id, now_str(), slot, 0, is_extra=1)
         await send_log(
             interaction.client,
             "primes",
             f"⚡ Саппорт {interaction.user.mention} взял доп. ПТ на слот `{slot}`."
         )
-        await interaction.response.send_message(
-            f"⚡ Вы успешно записались на доп. ПТ `{slot}` сегодня!", ephemeral=True
+        await interaction.response.edit_message(
+            content=f"⚡ Вы успешно записались на дополнительный ПТ **`{slot}`** сегодня!",
+            view=None
         )
+
+
+class ExtraPTView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=300)
+        self.add_item(ExtraPTSelect(ALL_SLOTS[:12], "🌙 Выберите слот (00:00 — 12:00)"))
+        self.add_item(ExtraPTSelect(ALL_SLOTS[12:], "☀️ Выберите слот (12:00 — 00:00)"))
 
 
 class PromoModal(discord.ui.Modal, title="Активация промокода"):
@@ -121,20 +126,31 @@ class ShopSelect(discord.ui.Select):
         )
 
 
+def build_profile_embed(member: discord.Member) -> discord.Embed:
+    embed = discord.Embed(
+        title=f"Профиль саппорта — {member.name}",
+        color=0x2B2D31
+    )
+    embed.set_image(url="attachment://profile.png")
+    return embed
+
+
 class ProfileView(discord.ui.View):
     def __init__(self, member: discord.Member):
         super().__init__(timeout=600)
         self.member = member
 
-    @discord.ui.button(label="Обновить", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="🔄 Обновить", style=discord.ButtonStyle.secondary, row=0)
     async def refresh_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         data = await ensure_support(self.member.id)
         av_bytes = await self.member.display_avatar.read()
         card = generate_profile_image(self.member.name, data, av_bytes)
         file = discord.File(card, filename="profile.png")
+        embed = build_profile_embed(self.member)
         await interaction.edit_original_response(
-            content=f"**Профиль саппорта - {self.member.name}**",
+            content=None,
+            embed=embed,
             attachments=[file],
             view=self
         )
@@ -176,7 +192,11 @@ class ProfileView(discord.ui.View):
 
     @discord.ui.button(label="🕒 Взять доп. ПТ", style=discord.ButtonStyle.secondary, row=1)
     async def extra_pt_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(ExtraPTModal())
+        await interaction.response.send_message(
+            "⚡ **Выберите часовой слот для дополнительного прайм-тайма на сегодня:**",
+            view=ExtraPTView(),
+            ephemeral=True
+        )
 
     @discord.ui.button(label="🕒 Прайм-таймы", style=discord.ButtonStyle.secondary, row=1)
     async def primes_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -245,9 +265,10 @@ class SupportProfileCog(commands.Cog):
         av_bytes = await interaction.user.display_avatar.read()
         card = generate_profile_image(interaction.user.name, data, av_bytes)
         file = discord.File(card, filename="profile.png")
+        embed = build_profile_embed(interaction.user)
         view = ProfileView(interaction.user)
         await interaction.followup.send(
-            content=f"**Профиль саппорта - {interaction.user.name}**",
+            embed=embed,
             file=file,
             view=view
         )

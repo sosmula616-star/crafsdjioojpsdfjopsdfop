@@ -100,7 +100,6 @@ class ReportsCog(commands.Cog):
         now = datetime.now(tz)
         today_str = now.strftime("%d.%m.%Y")
 
-        # За 5 минут до начала ПТ (в XX:55)
         if now.minute == 55:
             next_hour = (now.hour + 1) % 24
             end_hour = (next_hour + 1) % 24
@@ -123,7 +122,6 @@ class ReportsCog(commands.Cog):
             for uid in user_ids:
                 await self._send_dm_safe(uid, embed)
 
-        # В момент начала ПТ (в XX:00)
         elif now.minute == 0:
             cur_hour = now.hour
             end_hour = (cur_hour + 1) % 24

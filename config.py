@@ -8,7 +8,6 @@ GUILD_ID = int(os.getenv("GUILD_ID", "0"))
 LOG_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID", "0"))
 TOKEN_EMOJI = os.getenv("TOKEN_EMOJI", "<:SupportToken:1425839493750984774>")
 
-# Названия веток, которые бот автоматически создаёт в канале логов
 THREAD_NAMES = {
     "news": "Новости",
     "warns": "Выговоры",

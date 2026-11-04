@@ -5,11 +5,6 @@ from config import BRIDGE_HOST, BRIDGE_PORT, BRIDGE_SECRET
 from database import add_activity_minutes, ensure_support, now_str, DB_PATH
 
 class BridgeCog(commands.Cog):
-    '''
-    HTTP-мост для связки со вторым ботом (который стоит на сервере с голосовыми каналами / прихожими).
-    Второй бот может отправлять POST-запросы на http://IP:8080/api/activity
-    с заголовком X-Bridge-Secret.
-    '''
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.runner = None
@@ -46,7 +41,7 @@ class BridgeCog(commands.Cog):
 
         payload = await request.json()
         user_id = int(payload["user_id"])
-        field = payload.get("field")  # admitted, rejected, tickets
+        field = payload.get("field")
         delta = int(payload.get("delta", 1))
 
         if field not in ("admitted", "rejected", "tickets"):
