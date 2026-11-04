@@ -1,0 +1,381 @@
+import discord
+from discord import app_commands
+from discord.ext import commands
+from datetime import datetime, timedelta
+import pytz
+from config import TIMEZONE, ALL_SLOTS
+from database import (
+    ensure_support,
+    get_all_supports,
+    update_support_field,
+    delete_support,
+    set_activity_minutes,
+    now_str,
+    DB_PATH
+)
+import aiosqlite
+from utils.logger import send_log, resolve_token_emoji, ensure_all_log_threads
+
+def build_admin_embed(member: discord.Member, data: dict, emoji_str: str) -> discord.Embed:
+    embed = discord.Embed(
+        title=f"Админ панель — {member.name}",
+        color=0x2B2D31
+    )
+    pt = data.get("prime_time") or "Не назначен"
+    hire_date = data.get("hire_date") or now_str()
+    balance = data.get("balance", 0)
+
+    desc = (
+        f"Прайм-тайм: `{pt}`\n"
+        f"Дата принятия: `{hire_date}`\n"
+        f"Баланс: **{balance}** {emoji_str}"
+    )
+    if data.get("probation_until"):
+        desc += f"\nИсп. срок до: `{data['probation_until']}`"
+    if data.get("vacation_until"):
+        desc += f"\nОтпуск до: `{data['vacation_until']}`"
+
+    embed.description = desc
+    embed.set_thumbnail(url=member.display_avatar.url)
+    return embed
+
+
+class HireDateModal(discord.ui.Modal, title="Изменить дату принятия"):
+    date_input = discord.ui.TextInput(
+        label="Дата принятия (ДД.ММ.ГГГГ)",
+        placeholder="28.04.2026",
+        min_length=8,
+        max_length=10
+    )
+
+    def __init__(self, target: discord.Member, view: "AdminPanelView"):
+        super().__init__()
+        self.target = target
+        self.panel_view = view
+
+    async def on_submit(self, interaction: discord.Interaction):
+        val = self.date_input.value.strip()
+        try:
+            datetime.strptime(val, "%d.%m.%Y")
+        except ValueError:
+            return await interaction.response.send_message(
+                "❌ Неверный формат даты! Используйте `ДД.ММ.ГГГГ`.", ephemeral=True
+            )
+        await update_support_field(self.target.id, "hire_date", val)
+        data = await ensure_support(self.target.id)
+        self.panel_view.sync_styles(data)
+        em = resolve_token_emoji(interaction.client)
+        await interaction.response.edit_message(
+            embed=build_admin_embed(self.target, data, em),
+            view=self.panel_view
+        )
+
+
+class VacationModal(discord.ui.Modal, title="Выдать отпуск саппорту"):
+    until_input = discord.ui.TextInput(
+        label="До какой даты отпуск (ДД.ММ.ГГГГ)",
+        placeholder="10.05.2026",
+        min_length=8,
+        max_length=10
+    )
+
+    def __init__(self, target: discord.Member, view: "AdminPanelView"):
+        super().__init__()
+        self.target = target
+        self.panel_view = view
+
+    async def on_submit(self, interaction: discord.Interaction):
+        val = self.until_input.value.strip()
+        try:
+            datetime.strptime(val, "%d.%m.%Y")
+        except ValueError:
+            return await interaction.response.send_message(
+                "❌ Неверный формат даты! Используйте `ДД.ММ.ГГГГ`.", ephemeral=True
+            )
+        await update_support_field(self.target.id, "vacation_until", val)
+        data = await ensure_support(self.target.id)
+        self.panel_view.sync_styles(data)
+        em = resolve_token_emoji(interaction.client)
+        await interaction.response.edit_message(
+            embed=build_admin_embed(self.target, data, em),
+            view=self.panel_view
+        )
+
+
+class AdminPanelView(discord.ui.View):
+    def __init__(self, target: discord.Member, data: dict):
+        super().__init__(timeout=600)
+        self.target = target
+        self.sync_styles(data)
+
+    def sync_styles(self, data: dict):
+        if data.get("probation_until"):
+            self.probation_btn.style = discord.ButtonStyle.success
+        else:
+            self.probation_btn.style = discord.ButtonStyle.secondary
+
+        if data.get("vacation_until"):
+            self.vacation_btn.style = discord.ButtonStyle.success
+        else:
+            self.vacation_btn.style = discord.ButtonStyle.secondary
+
+    @discord.ui.button(label="Дата принятия", style=discord.ButtonStyle.primary, row=0)
+    async def hire_date_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(HireDateModal(self.target, self))
+
+    @discord.ui.button(label="Исп.срок", style=discord.ButtonStyle.secondary, row=0)
+    async def probation_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        data = await ensure_support(self.target.id)
+        if data.get("probation_until"):
+            await update_support_field(self.target.id, "probation_until", None)
+        else:
+            tz = pytz.timezone(TIMEZONE)
+            until = (datetime.now(tz) + timedelta(days=7)).strftime("%d.%m.%Y")
+            await update_support_field(self.target.id, "probation_until", until)
+
+        new_data = await ensure_support(self.target.id)
+        self.sync_styles(new_data)
+        em = resolve_token_emoji(interaction.client)
+        await interaction.response.edit_message(
+            embed=build_admin_embed(self.target, new_data, em),
+            view=self
+        )
+
+    @discord.ui.button(label="Отпуск", style=discord.ButtonStyle.secondary, row=0)
+    async def vacation_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        data = await ensure_support(self.target.id)
+        if data.get("vacation_until"):
+            await update_support_field(self.target.id, "vacation_until", None)
+            new_data = await ensure_support(self.target.id)
+            self.sync_styles(new_data)
+            em = resolve_token_emoji(interaction.client)
+            await interaction.response.edit_message(
+                embed=build_admin_embed(self.target, new_data, em),
+                view=self
+            )
+        else:
+            await interaction.response.send_modal(VacationModal(self.target, self))
+
+    @discord.ui.button(label="Удалить из БД", style=discord.ButtonStyle.danger, row=1)
+    async def delete_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await delete_support(self.target.id)
+        await send_log(
+            interaction.client,
+            "removals",
+            f"🗑️ **{interaction.user.mention}** удалил саппорта {self.target.mention} из базы данных."
+        )
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(
+            content=f"✅ Саппорт {self.target.mention} удалён из БД.",
+            embed=None,
+            view=self
+        )
+
+
+class AdminCommands(commands.Cog):
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+
+    admin_group = app_commands.Group(name="admin", description="Админ-команды управления саппортами")
+    prime_group = app_commands.Group(name="prime", description="Управление прайм-таймами")
+
+    @app_commands.command(name="set_logs", description="Привязать канал #логи (бот сам создаст в нём все 9 веток)")
+    @app_commands.describe(канал="Текстовый канал для логов и отчётов")
+    @app_commands.default_permissions(manage_guild=True)
+    async def set_logs_cmd(self, interaction: discord.Interaction, канал: discord.TextChannel):
+        await interaction.response.defer(ephemeral=True)
+        threads = await ensure_all_log_threads(self.bot, канал)
+        mentions = ", ".join(t.mention for t in threads.values())
+        await interaction.followup.send(
+            f"✅ Канал {канал.mention} привязан! Все ветки готовы:\n{mentions}",
+            ephemeral=True
+        )
+
+    @admin_group.command(name="panel", description="Управление выбранным саппортом")
+    @app_commands.describe(саппорт="Выберите саппорта")
+    @app_commands.default_permissions(manage_guild=True)
+    async def admin_panel(self, interaction: discord.Interaction, саппорт: discord.Member):
+        data = await ensure_support(саппорт.id)
+        view = AdminPanelView(саппорт, data)
+        em = resolve_token_emoji(self.bot)
+        embed = build_admin_embed(саппорт, data, em)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+    # --- РАБОТА С ТОКЕНАМИ ---
+    @app_commands.command(name="award", description="Выдать токены саппорту")
+    @app_commands.describe(саппорт="Кому выдать", количество="Сколько токенов", причина="Причина выдачи")
+    @app_commands.default_permissions(manage_guild=True)
+    async def award_cmd(self, interaction: discord.Interaction, саппорт: discord.Member, количество: int, причина: str = "Не указана"):
+        data = await ensure_support(саппорт.id)
+        new_bal = data["balance"] + количество
+        await update_support_field(саппорт.id, "balance", new_bal)
+        em = resolve_token_emoji(self.bot)
+        await send_log(
+            self.bot,
+            "tokens",
+            f"➕ {interaction.user.mention} выдал **{количество}** {em} саппорту {саппорт.mention}. Причина: `{причина}` (Баланс: `{new_bal}` {em})"
+        )
+        await interaction.response.send_message(
+            f"✅ Выдано **{количество}** {em} для {саппорт.mention}. Текущий баланс: **{new_bal}** {em}",
+            ephemeral=True
+        )
+
+    @app_commands.command(name="take", description="Забрать токены у саппорта")
+    @app_commands.describe(саппорт="У кого забрать", количество="Сколько токенов", причина="Причина")
+    @app_commands.default_permissions(manage_guild=True)
+    async def take_cmd(self, interaction: discord.Interaction, саппорт: discord.Member, количество: int, причина: str = "Не указана"):
+        data = await ensure_support(саппорт.id)
+        new_bal = max(0, data["balance"] - количество)
+        await update_support_field(саппорт.id, "balance", new_bal)
+        em = resolve_token_emoji(self.bot)
+        await send_log(
+            self.bot,
+            "tokens",
+            f"➖ {interaction.user.mention} забрал **{количество}** {em} у саппорта {саппорт.mention}. Причина: `{причина}` (Баланс: `{new_bal}` {em})"
+        )
+        await interaction.response.send_message(
+            f"✅ Забрано **{количество}** {em} у {саппорт.mention}. Текущий баланс: **{new_bal}** {em}",
+            ephemeral=True
+        )
+
+    # --- РАБОТА С ПРАЙМ-ТАЙМАМИ ---
+    @prime_group.command(name="set", description="Назначить или сменить прайм-тайм саппорту")
+    @app_commands.describe(саппорт="Саппорт", время="Например 20:00-21:00")
+    @app_commands.default_permissions(manage_guild=True)
+    async def prime_set(self, interaction: discord.Interaction, саппорт: discord.Member, время: str):
+        время = время.strip()
+        if время not in ALL_SLOTS:
+            return await interaction.response.send_message(
+                f"❌ Неверный формат слота! Пример: `20:00-21:00`", ephemeral=True
+            )
+        await ensure_support(саппорт.id)
+        await update_support_field(саппорт.id, "prime_time", время)
+        await send_log(
+            self.bot,
+            "primes",
+            f"🕒 {interaction.user.mention} установил прайм-тайм `{время}` для {саппорт.mention}."
+        )
+        await interaction.response.send_message(
+            f"✅ Прайм-тайм для {саппорт.mention} установлен на `{время}`.", ephemeral=True
+        )
+
+    @prime_group.command(name="remove", description="Удалить прайм-тайм у саппорта")
+    @app_commands.describe(саппорт="Саппорт")
+    @app_commands.default_permissions(manage_guild=True)
+    async def prime_remove(self, interaction: discord.Interaction, саппорт: discord.Member):
+        await ensure_support(саппорт.id)
+        await update_support_field(саппорт.id, "prime_time", None)
+        await send_log(
+            self.bot,
+            "primes",
+            f"🗑️ {interaction.user.mention} удалил прайм-тайм у {саппорт.mention}."
+        )
+        await interaction.response.send_message(
+            f"✅ Прайм-тайм у {саппорт.mention} удалён.", ephemeral=True
+        )
+
+    @prime_group.command(name="list", description="Таблица прайм-таймов всех саппортов")
+    async def prime_list(self, interaction: discord.Interaction):
+        supports = await get_all_supports()
+        by_slot: dict[str, list[str]] = {slot: [] for slot in ALL_SLOTS}
+        for s in supports:
+            slot = s.get("prime_time")
+            if slot in by_slot:
+                suffix = " 🌴" if s.get("vacation_until") else ""
+                by_slot[slot].append(f"<@{s['user_id']}>{suffix}")
+
+        embed = discord.Embed(title="📅 Таблица прайм-таймов", color=0x2B2D31)
+        for slot in ALL_SLOTS:
+            users = by_slot[slot]
+            val = "\n".join(users) if users else "`Свободно`"
+            embed.add_field(name=slot, value=val, inline=True)
+
+        await interaction.response.send_message(embed=embed)
+
+    # --- РАБОТА С ОТЧЁТАМИ ДЛЯ ЛИЗЫ ---
+    @prime_group.command(name="add", description="Засчитать ПТ саппорту (по умолчанию за сегодня)")
+    @app_commands.describe(саппорт="Саппорт", дата="Дата ДД.ММ.ГГГГ (необязательно)")
+    @app_commands.default_permissions(manage_guild=True)
+    async def prime_add(self, interaction: discord.Interaction, саппорт: discord.Member, дата: str = None):
+        data = await ensure_support(саппорт.id)
+        slot = data.get("prime_time")
+        if not slot:
+            return await interaction.response.send_message(
+                "❌ У этого саппорта не назначен прайм-тайм!", ephemeral=True
+            )
+        target_date = дата.strip() if дата else now_str()
+        await set_activity_minutes(саппорт.id, target_date, slot, 60, is_extra=0)
+        await send_log(
+            self.bot,
+            "reports",
+            f"✅ {interaction.user.mention} вручную засчитал ПТ (`{slot}` за `{target_date}`) саппорту {саппорт.mention}."
+        )
+        await interaction.response.send_message(
+            f"✅ ПТ `{slot}` за `{target_date}` засчитан (60 мин) для {саппорт.mention}.",
+            ephemeral=True
+        )
+
+    @app_commands.command(name="miss", description="Вычесть пропуск из отчётов (уменьшить счётчик прогулов)")
+    @app_commands.describe(саппорт="Саппорт", количество="Сколько прогулов вычесть (по умолчанию 1)")
+    @app_commands.default_permissions(manage_guild=True)
+    async def miss_cmd(self, interaction: discord.Interaction, саппорт: discord.Member, количество: int = 1):
+        data = await ensure_support(саппорт.id)
+        new_misses = max(0, data.get("weekly_misses", 0) - количество)
+        await update_support_field(саппорт.id, "weekly_misses", new_misses)
+        await send_log(
+            self.bot,
+            "reports",
+            f"📉 {interaction.user.mention} вычел `{количество}` прогул(ов) у {саппорт.mention}. Теперь: `[{new_misses}]`."
+        )
+        await interaction.response.send_message(
+            f"✅ У {саппорт.mention} вычтено `{количество}` прогулов. Текущий счётчик: `[{new_misses}]`.",
+            ephemeral=True
+        )
+
+    # --- ДРУГОЕ ---
+    @app_commands.command(name="swap_as", description="Запросить замену от имени саппорта")
+    @app_commands.describe(саппорт="От чьего имени запросить замену", дата="Дата ДД.ММ.ГГГГ (по умолчанию сегодня)")
+    @app_commands.default_permissions(manage_guild=True)
+    async def swap_as_cmd(self, interaction: discord.Interaction, саппорт: discord.Member, дата: str = None):
+        data = await ensure_support(саппорт.id)
+        slot = data.get("prime_time")
+        if not slot:
+            return await interaction.response.send_message(
+                "❌ У саппорта нет назначенного ПТ!", ephemeral=True
+            )
+        target_date = дата.strip() if дата else now_str()
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "INSERT INTO swap_requests (requester_id, date_str, slot) VALUES (?, ?, ?)",
+                (саппорт.id, target_date, slot)
+            )
+            await db.commit()
+
+        await send_log(
+            self.bot,
+            "swaps",
+            f"🔄 Запрошена замена для {саппорт.mention} на слот `{slot}` (`{target_date}`) (создал: {interaction.user.mention})."
+        )
+        await interaction.response.send_message(
+            f"✅ Запрос на замену от имени {саппорт.mention} (`{slot}`, `{target_date}`) создан!",
+            ephemeral=True
+        )
+
+    @app_commands.command(name="dm", description="Отправить сообщение в ЛС от имени бота")
+    @app_commands.describe(пользователь="Кому отправить", текст="Текст сообщения")
+    @app_commands.default_permissions(manage_guild=True)
+    async def dm_cmd(self, interaction: discord.Interaction, пользователь: discord.Member, текст: str):
+        try:
+            await пользователь.send(текст)
+            await interaction.response.send_message(
+                f"✅ Сообщение успешно отправлено в ЛС {пользователь.mention}.", ephemeral=True
+            )
+        except Exception as e:
+            await interaction.response.send_message(
+                f"❌ Не удалось отправить ЛС пользователю: {e}", ephemeral=True
+            )
+
+
+async def setup(bot: commands.Bot):
+    await bot.add_cog(AdminCommands(bot))
