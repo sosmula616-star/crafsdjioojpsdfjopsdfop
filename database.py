@@ -1,13 +1,18 @@
 import aiosqlite
 from datetime import datetime
 import pytz
-from config import TIMEZONE
+from config import TIMEZONE, MAX_WARNS
 
 DB_PATH = "support_bot.db"
 
 def now_str() -> str:
     tz = pytz.timezone(TIMEZONE)
     return datetime.now(tz).strftime("%d.%m.%Y")
+
+def current_slot_str() -> str:
+    tz = pytz.timezone(TIMEZONE)
+    h = datetime.now(tz).hour
+    return f"{h}:00-{(h + 1) % 24}:00"
 
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
@@ -17,14 +22,12 @@ async def init_db():
                 value TEXT NOT NULL
             )
         ''')
-
         await db.execute('''
             CREATE TABLE IF NOT EXISTS log_threads (
                 category TEXT PRIMARY KEY,
                 thread_id INTEGER NOT NULL
             )
         ''')
-
         await db.execute('''
             CREATE TABLE IF NOT EXISTS supports (
                 user_id INTEGER PRIMARY KEY,
@@ -40,10 +43,21 @@ async def init_db():
                 total_minutes INTEGER DEFAULT 0,
                 swaps_taken INTEGER DEFAULT 0,
                 tickets INTEGER DEFAULT 0,
-                warns INTEGER DEFAULT 0
+                warns INTEGER DEFAULT 0,
+                is_exempt INTEGER DEFAULT 0
             )
         ''')
+        try:
+            await db.execute("ALTER TABLE supports ADD COLUMN is_exempt INTEGER DEFAULT 0")
+        except Exception:
+            pass
 
+        await db.execute('''
+            CREATE TABLE IF NOT EXISTS processed_events (
+                event_key TEXT PRIMARY KEY,
+                created_at TEXT NOT NULL
+            )
+        ''')
         await db.execute('''
             CREATE TABLE IF NOT EXISTS daily_activity (
                 user_id INTEGER,
@@ -55,7 +69,6 @@ async def init_db():
                 PRIMARY KEY (user_id, date_str, slot)
             )
         ''')
-
         await db.execute('''
             CREATE TABLE IF NOT EXISTS swap_requests (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -65,7 +78,6 @@ async def init_db():
                 taken_by INTEGER DEFAULT NULL
             )
         ''')
-
         await db.execute('''
             CREATE TABLE IF NOT EXISTS shop_items (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -73,7 +85,6 @@ async def init_db():
                 price INTEGER NOT NULL
             )
         ''')
-
         await db.execute('''
             CREATE TABLE IF NOT EXISTS inventory (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -82,7 +93,6 @@ async def init_db():
                 bought_at TEXT NOT NULL
             )
         ''')
-
         await db.execute('''
             CREATE TABLE IF NOT EXISTS promocodes (
                 code TEXT PRIMARY KEY,
@@ -90,7 +100,6 @@ async def init_db():
                 uses_left INTEGER NOT NULL
             )
         ''')
-
         await db.execute('''
             CREATE TABLE IF NOT EXISTS promo_used (
                 user_id INTEGER,
@@ -98,7 +107,6 @@ async def init_db():
                 PRIMARY KEY (user_id, code)
             )
         ''')
-
         async with db.execute("SELECT COUNT(*) FROM shop_items") as cur:
             cnt = (await cur.fetchone())[0]
             if cnt == 0:
@@ -107,6 +115,18 @@ async def init_db():
                     [("Снятие выговора", 500), ("Иммунитет на ПТ", 300), ("Кастомная роль", 1000)]
                 )
         await db.commit()
+
+async def mark_event_processed(event_key: str) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT 1 FROM processed_events WHERE event_key = ?", (event_key,)) as cur:
+            if await cur.fetchone():
+                return False
+        await db.execute(
+            "INSERT INTO processed_events (event_key, created_at) VALUES (?, ?)",
+            (event_key, now_str())
+        )
+        await db.commit()
+        return True
 
 async def set_setting(key: str, value: str):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -171,6 +191,23 @@ async def update_support_field(user_id: int, field: str, value):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(f"UPDATE supports SET {field} = ? WHERE user_id = ?", (value, user_id))
         await db.commit()
+
+async def change_warns(user_id: int, delta: int = 1, exact: int | None = None) -> int:
+    data = await ensure_support(user_id)
+    if exact is not None:
+        new_warns = max(0, min(MAX_WARNS, exact))
+    else:
+        new_warns = max(0, min(MAX_WARNS, data.get("warns", 0) + delta))
+    await update_support_field(user_id, "warns", new_warns)
+    return new_warns
+
+async def increment_stat(user_id: int, field: str, delta: int = 1) -> int:
+    await ensure_support(user_id)
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(f"UPDATE supports SET {field} = MAX(0, {field} + ?) WHERE user_id = ?", (delta, user_id))
+        await db.commit()
+    data = await ensure_support(user_id)
+    return data.get(field, 0)
 
 async def delete_support(user_id: int):
     async with aiosqlite.connect(DB_PATH) as db:

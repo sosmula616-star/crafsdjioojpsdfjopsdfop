@@ -3,11 +3,12 @@ from discord import app_commands
 from discord.ext import commands
 from datetime import datetime, timedelta
 import pytz
-from config import TIMEZONE, ALL_SLOTS
+from config import TIMEZONE, ALL_SLOTS, MAX_WARNS
 from database import (
     ensure_support,
     get_all_supports,
     update_support_field,
+    change_warns,
     delete_support,
     set_activity_minutes,
     now_str,
@@ -15,19 +16,23 @@ from database import (
 )
 import aiosqlite
 from utils.logger import send_log, resolve_token_emoji, ensure_all_log_threads
+from utils.permissions import can_use_support_commands, validate_target_support, parse_user_id
 
-def build_admin_embed(member: discord.Member, data: dict, emoji_str: str) -> discord.Embed:
+def build_admin_embed(user_obj: discord.Member | discord.User, data: dict, emoji_str: str) -> discord.Embed:
     embed = discord.Embed(
-        title=f"Админ панель — {member.name}",
+        title=f"Админ панель — {user_obj.name}",
         color=0x2B2D31
     )
     pt = data.get("prime_time") or "Не назначен"
     hire_date = data.get("hire_date") or now_str()
     balance = data.get("balance", 0)
+    warns = data.get("warns", 0)
 
     desc = (
+        f"Саппорт: <@{user_obj.id}> (`{user_obj.id}`)\n"
         f"Прайм-тайм: `{pt}`\n"
         f"Дата принятия: `{hire_date}`\n"
+        f"Выговоры: **`{warns} / {MAX_WARNS}`**\n"
         f"Баланс: **{balance}** {emoji_str}"
     )
     if data.get("probation_until"):
@@ -36,24 +41,24 @@ def build_admin_embed(member: discord.Member, data: dict, emoji_str: str) -> dis
         desc += f"\nОтпуск до: `{data['vacation_until']}`"
 
     embed.description = desc
-    embed.set_thumbnail(url=member.display_avatar.url)
+    embed.set_thumbnail(url=user_obj.display_avatar.url)
     return embed
 
 
-async def build_pt_picker_embed(target: discord.Member, current_slot: str | None) -> discord.Embed:
+async def build_pt_picker_embed(target: discord.Member | discord.User, current_slot: str | None) -> discord.Embed:
     supports = await get_all_supports()
     counts = {s: 0 for s in ALL_SLOTS}
     for s in supports:
         pt = s.get("prime_time")
-        if pt in counts:
+        if pt in counts and not s.get("is_exempt"):
             counts[pt] += 1
 
     embed = discord.Embed(
         title=f"🕒 Назначение прайм-тайма — {target.display_name}",
         description=(
-            f"Саппорт: {target.mention}\n"
+            f"Саппорт: <@{target.id}> (`{target.id}`)\n"
             f"Текущий прайм-тайм: **`{current_slot or 'Не назначен'}`**\n\n"
-            "Выберите нужный часовой слот в меню ниже (в скобках указано, сколько саппортов уже стоит на этом времени):"
+            "Выберите нужный часовой слот в меню ниже:"
         ),
         color=0x5865F2
     )
@@ -62,7 +67,7 @@ async def build_pt_picker_embed(target: discord.Member, current_slot: str | None
 
 
 class SlotSelect(discord.ui.Select):
-    def __init__(self, target: discord.Member, slots_slice: list[str], placeholder: str, counts: dict[str, int], current_slot: str | None, parent_panel: "AdminPanelView | None" = None):
+    def __init__(self, target: discord.Member | discord.User, slots_slice: list[str], placeholder: str, counts: dict[str, int], current_slot: str | None, parent_panel: "AdminPanelView | None" = None):
         self.target = target
         self.parent_panel = parent_panel
         options = []
@@ -87,33 +92,32 @@ class SlotSelect(discord.ui.Select):
         await send_log(
             interaction.client,
             "primes",
-            f"🕒 {interaction.user.mention} установил прайм-тайм `{chosen_slot}` для {self.target.mention}."
+            f"🕒 {interaction.user.mention} установил прайм-тайм `{chosen_slot}` для <@{self.target.id}>."
         )
 
         supports = await get_all_supports()
         counts = {s: 0 for s in ALL_SLOTS}
         for s in supports:
-            if s.get("prime_time") in counts:
+            if s.get("prime_time") in counts and not s.get("is_exempt"):
                 counts[s["prime_time"]] += 1
 
         new_view = PrimeTimePickerView(self.target, counts, chosen_slot, self.parent_panel)
         new_embed = await build_pt_picker_embed(self.target, chosen_slot)
         await interaction.response.edit_message(
-            content=f"✅ Прайм-тайм для {self.target.mention} успешно изменён на **`{chosen_slot}`**!",
+            content=f"✅ Прайм-тайм для <@{self.target.id}> успешно изменён на **`{chosen_slot}`**!",
             embed=new_embed,
             view=new_view
         )
 
 
 class PrimeTimePickerView(discord.ui.View):
-    '''Интерактивная панель выбора прайм-тайма в 1 клик (00:00-12:00 и 12:00-00:00)'''
-    def __init__(self, target: discord.Member, counts: dict[str, int], current_slot: str | None, parent_panel: "AdminPanelView | None" = None):
+    def __init__(self, target: discord.Member | discord.User, counts: dict[str, int], current_slot: str | None, parent_panel: "AdminPanelView | None" = None):
         super().__init__(timeout=600)
         self.target = target
         self.parent_panel = parent_panel
 
-        morning_slots = ALL_SLOTS[:12]   # 0:00-1:00 ... 11:00-12:00
-        evening_slots = ALL_SLOTS[12:]   # 12:00-13:00 ... 23:00-0:00
+        morning_slots = ALL_SLOTS[:12]
+        evening_slots = ALL_SLOTS[12:]
 
         self.add_item(SlotSelect(
             target, morning_slots,
@@ -133,18 +137,18 @@ class PrimeTimePickerView(discord.ui.View):
         await send_log(
             interaction.client,
             "primes",
-            f"🗑️ {interaction.user.mention} снял прайм-тайм у {self.target.mention}."
+            f"🗑️ {interaction.user.mention} снял прайм-тайм у <@{self.target.id}>."
         )
         supports = await get_all_supports()
         counts = {s: 0 for s in ALL_SLOTS}
         for s in supports:
-            if s.get("prime_time") in counts:
+            if s.get("prime_time") in counts and not s.get("is_exempt"):
                 counts[s["prime_time"]] += 1
 
         new_view = PrimeTimePickerView(self.target, counts, None, self.parent_panel)
         new_embed = await build_pt_picker_embed(self.target, None)
         await interaction.response.edit_message(
-            content=f"🗑️ Прайм-тайм у {self.target.mention} удалён.",
+            content=f"🗑️ Прайм-тайм у <@{self.target.id}> удалён.",
             embed=new_embed,
             view=new_view
         )
@@ -166,7 +170,7 @@ class HireDateModal(discord.ui.Modal, title="Изменить дату прин�
         max_length=10
     )
 
-    def __init__(self, target: discord.Member, view: "AdminPanelView"):
+    def __init__(self, target: discord.Member | discord.User, view: "AdminPanelView"):
         super().__init__()
         self.target = target
         self.panel_view = view
@@ -197,7 +201,7 @@ class VacationModal(discord.ui.Modal, title="Выдать отпуск сапп�
         max_length=10
     )
 
-    def __init__(self, target: discord.Member, view: "AdminPanelView"):
+    def __init__(self, target: discord.Member | discord.User, view: "AdminPanelView"):
         super().__init__()
         self.target = target
         self.panel_view = view
@@ -221,7 +225,7 @@ class VacationModal(discord.ui.Modal, title="Выдать отпуск сапп�
 
 
 class AdminPanelView(discord.ui.View):
-    def __init__(self, target: discord.Member, data: dict):
+    def __init__(self, target: discord.Member | discord.User, data: dict):
         super().__init__(timeout=600)
         self.target = target
         self.sync_styles(data)
@@ -280,25 +284,49 @@ class AdminPanelView(discord.ui.View):
         supports = await get_all_supports()
         counts = {s: 0 for s in ALL_SLOTS}
         for s in supports:
-            if s.get("prime_time") in counts:
+            if s.get("prime_time") in counts and not s.get("is_exempt"):
                 counts[s["prime_time"]] += 1
 
         picker_view = PrimeTimePickerView(self.target, counts, data.get("prime_time"), self)
         picker_embed = await build_pt_picker_embed(self.target, data.get("prime_time"))
         await interaction.response.edit_message(embed=picker_embed, view=picker_view)
 
-    @discord.ui.button(label="Удалить из БД", style=discord.ButtonStyle.danger, row=1)
+    @discord.ui.button(label="+1 Выговор", style=discord.ButtonStyle.secondary, emoji="⚠️", row=1)
+    async def add_warn_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        new_w = await change_warns(self.target.id, delta=1)
+        await send_log(
+            interaction.client,
+            "warns",
+            f"⚠️ {interaction.user.mention} выдал выговор <@{self.target.id}> через админ-панель. Теперь: **`{new_w}/{MAX_WARNS}`**."
+        )
+        new_data = await ensure_support(self.target.id)
+        em = resolve_token_emoji(interaction.client)
+        await interaction.response.edit_message(embed=build_admin_embed(self.target, new_data, em), view=self)
+
+    @discord.ui.button(label="-1 Выговор", style=discord.ButtonStyle.secondary, row=1)
+    async def rem_warn_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        new_w = await change_warns(self.target.id, delta=-1)
+        await send_log(
+            interaction.client,
+            "warns",
+            f"✅ {interaction.user.mention} снял выговор у <@{self.target.id}> через админ-панель. Теперь: **`{new_w}/{MAX_WARNS}`**."
+        )
+        new_data = await ensure_support(self.target.id)
+        em = resolve_token_emoji(interaction.client)
+        await interaction.response.edit_message(embed=build_admin_embed(self.target, new_data, em), view=self)
+
+    @discord.ui.button(label="Удалить из БД", style=discord.ButtonStyle.danger, row=2)
     async def delete_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await delete_support(self.target.id)
         await send_log(
             interaction.client,
             "removals",
-            f"🗑️ **{interaction.user.mention}** удалил саппорта {self.target.mention} из базы данных."
+            f"🗑️ **{interaction.user.mention}** удалил саппорта <@{self.target.id}> из базы данных."
         )
         for child in self.children:
             child.disabled = True
         await interaction.response.edit_message(
-            content=f"✅ Саппорт {self.target.mention} удалён из БД.",
+            content=f"✅ Саппорт <@{self.target.id}> удалён из БД.",
             embed=None,
             view=self
         )
@@ -323,89 +351,132 @@ class AdminCommands(commands.Cog):
             ephemeral=True
         )
 
-    @admin_group.command(name="panel", description="Управление выбранным саппортом")
-    @app_commands.describe(саппорт="Выберите саппорта")
+    @admin_group.command(name="panel", description="Управление выбранным саппортом (по упоминанию или ID)")
+    @app_commands.describe(саппорт="Упоминание @саппорта или его Discord ID")
     @app_commands.default_permissions(manage_guild=True)
-    async def admin_panel(self, interaction: discord.Interaction, саппорт: discord.Member):
-        data = await ensure_support(саппорт.id)
-        view = AdminPanelView(саппорт, data)
+    async def admin_panel(self, interaction: discord.Interaction, саппорт: str):
+        uid = parse_user_id(саппорт)
+        if not uid:
+            return await interaction.response.send_message("❌ Укажите корректное упоминание или ID!", ephemeral=True)
+
+        ok, target_obj = await validate_target_support(interaction, uid, allow_exempt_view=False)
+        if not ok:
+            return
+
+        data = await ensure_support(uid)
+        view = AdminPanelView(target_obj, data)
         em = resolve_token_emoji(self.bot)
-        embed = build_admin_embed(саппорт, data, em)
+        embed = build_admin_embed(target_obj, data, em)
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
-    # --- РАБОТА С ТОКЕНАМИ ---
-    @app_commands.command(name="award", description="Выдать токены саппорту")
-    @app_commands.describe(саппорт="Кому выдать", количество="Сколько токенов", причина="Причина выдачи")
+    @app_commands.command(name="award", description="Выдать токены саппорту (по упоминанию или ID)")
+    @app_commands.describe(саппорт="Упоминание или ID саппорта", количество="Сколько токенов", причина="Причина выдачи")
     @app_commands.default_permissions(manage_guild=True)
-    async def award_cmd(self, interaction: discord.Interaction, саппорт: discord.Member, количество: int, причина: str = "Не указана"):
-        data = await ensure_support(саппорт.id)
+    async def award_cmd(self, interaction: discord.Interaction, саппорт: str, количество: int, причина: str = "Не указана"):
+        uid = parse_user_id(саппорт)
+        if not uid:
+            return await interaction.response.send_message("❌ Укажите корректное упоминание или ID!", ephemeral=True)
+
+        ok, _ = await validate_target_support(interaction, uid)
+        if not ok:
+            return
+
+        data = await ensure_support(uid)
         new_bal = data["balance"] + количество
-        await update_support_field(саппорт.id, "balance", new_bal)
+        await update_support_field(uid, "balance", new_bal)
         em = resolve_token_emoji(self.bot)
         await send_log(
             self.bot,
             "tokens",
-            f"➕ {interaction.user.mention} выдал **{количество}** {em} саппорту {саппорт.mention}. Причина: `{причина}` (Баланс: `{new_bal}` {em})"
+            f"➕ {interaction.user.mention} выдал **{количество}** {em} саппорту <@{uid}>. Причина: `{причина}` (Баланс: `{new_bal}` {em})"
         )
         await interaction.response.send_message(
-            f"✅ Выдано **{количество}** {em} для {саппорт.mention}. Текущий баланс: **{new_bal}** {em}",
+            f"✅ Выдано **{количество}** {em} для <@{uid}>. Текущий баланс: **{new_bal}** {em}",
             ephemeral=True
         )
 
-    @app_commands.command(name="take", description="Забрать токены у саппорта")
-    @app_commands.describe(саппорт="У кого забрать", количество="Сколько токенов", причина="Причина")
+    @app_commands.command(name="take", description="Забрать токены у саппорта (по упоминанию или ID)")
+    @app_commands.describe(саппорт="Упоминание или ID саппорта", количество="Сколько токенов", причина="Причина")
     @app_commands.default_permissions(manage_guild=True)
-    async def take_cmd(self, interaction: discord.Interaction, саппорт: discord.Member, количество: int, причина: str = "Не указана"):
-        data = await ensure_support(саппорт.id)
+    async def take_cmd(self, interaction: discord.Interaction, саппорт: str, количество: int, причина: str = "Не указана"):
+        uid = parse_user_id(саппорт)
+        if not uid:
+            return await interaction.response.send_message("❌ Укажите корректное упоминание или ID!", ephemeral=True)
+
+        ok, _ = await validate_target_support(interaction, uid)
+        if not ok:
+            return
+
+        data = await ensure_support(uid)
         new_bal = max(0, data["balance"] - количество)
-        await update_support_field(саппорт.id, "balance", new_bal)
+        await update_support_field(uid, "balance", new_bal)
         em = resolve_token_emoji(self.bot)
         await send_log(
             self.bot,
             "tokens",
-            f"➖ {interaction.user.mention} забрал **{количество}** {em} у саппорта {саппорт.mention}. Причина: `{причина}` (Баланс: `{new_bal}` {em})"
+            f"➖ {interaction.user.mention} забрал **{количество}** {em} у саппорта <@{uid}>. Причина: `{причина}` (Баланс: `{new_bal}` {em})"
         )
         await interaction.response.send_message(
-            f"✅ Забрано **{количество}** {em} у {саппорт.mention}. Текущий баланс: **{new_bal}** {em}",
+            f"✅ Забрано **{количество}** {em} у <@{uid}>. Текущий баланс: **{new_bal}** {em}",
             ephemeral=True
         )
 
-    # --- РАБОТА С ПРАЙМ-ТАЙМАМИ (Интерактивная панель выбора) ---
-    @prime_group.command(name="set", description="Открыть удобную панель назначения прайм-тайма саппорту")
-    @app_commands.describe(саппорт="Выберите саппорта, которому нужно поставить ПТ")
+    @prime_group.command(name="set", description="Открыть панель назначения прайм-тайма саппорту (по упоминанию или ID)")
+    @app_commands.describe(саппорт="Упоминание или ID саппорта")
     @app_commands.default_permissions(manage_guild=True)
-    async def prime_set(self, interaction: discord.Interaction, саппорт: discord.Member):
-        data = await ensure_support(саппорт.id)
+    async def prime_set(self, interaction: discord.Interaction, саппорт: str):
+        uid = parse_user_id(саппорт)
+        if not uid:
+            return await interaction.response.send_message("❌ Укажите корректное упоминание или ID!", ephemeral=True)
+
+        ok, target_obj = await validate_target_support(interaction, uid)
+        if not ok:
+            return
+
+        data = await ensure_support(uid)
         supports = await get_all_supports()
         counts = {s: 0 for s in ALL_SLOTS}
         for s in supports:
-            if s.get("prime_time") in counts:
+            if s.get("prime_time") in counts and not s.get("is_exempt"):
                 counts[s["prime_time"]] += 1
 
-        view = PrimeTimePickerView(саппорт, counts, data.get("prime_time"))
-        embed = await build_pt_picker_embed(саппорт, data.get("prime_time"))
+        view = PrimeTimePickerView(target_obj, counts, data.get("prime_time"))
+        embed = await build_pt_picker_embed(target_obj, data.get("prime_time"))
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
-    @prime_group.command(name="remove", description="Удалить прайм-тайм у саппорта")
-    @app_commands.describe(саппорт="Саппорт")
+    @prime_group.command(name="remove", description="Удалить прайм-тайм у саппорта (по упоминанию или ID)")
+    @app_commands.describe(саппорт="Упоминание или ID саппорта")
     @app_commands.default_permissions(manage_guild=True)
-    async def prime_remove(self, interaction: discord.Interaction, саппорт: discord.Member):
-        await ensure_support(саппорт.id)
-        await update_support_field(саппорт.id, "prime_time", None)
+    async def prime_remove(self, interaction: discord.Interaction, саппорт: str):
+        uid = parse_user_id(саппорт)
+        if not uid:
+            return await interaction.response.send_message("❌ Укажите корректное упоминание или ID!", ephemeral=True)
+
+        ok, _ = await validate_target_support(interaction, uid)
+        if not ok:
+            return
+
+        await ensure_support(uid)
+        await update_support_field(uid, "prime_time", None)
         await send_log(
             self.bot,
             "primes",
-            f"🗑️ {interaction.user.mention} удалил прайм-тайм у {саппорт.mention}."
+            f"🗑️ {interaction.user.mention} удалил прайм-тайм у <@{uid}>."
         )
         await interaction.response.send_message(
-            f"✅ Прайм-тайм у {саппорт.mention} удалён.", ephemeral=True
+            f"✅ Прайм-тайм у <@{uid}> удалён.", ephemeral=True
         )
 
     @prime_group.command(name="list", description="Таблица прайм-таймов всех саппортов")
     async def prime_list(self, interaction: discord.Interaction):
+        if not await can_use_support_commands(interaction):
+            return
+
         supports = await get_all_supports()
         by_slot: dict[str, list[str]] = {slot: [] for slot in ALL_SLOTS}
         for s in supports:
+            if s.get("is_exempt"):
+                continue
             slot = s.get("prime_time")
             if slot in by_slot:
                 suffix = " 🌴" if s.get("vacation_until") else ""
@@ -419,52 +490,74 @@ class AdminCommands(commands.Cog):
 
         await interaction.response.send_message(embed=embed)
 
-    # --- РАБОТА С ОТЧЁТАМИ ДЛЯ ЛИЗЫ ---
     @prime_group.command(name="add", description="Засчитать ПТ саппорту (по умолчанию за сегодня)")
-    @app_commands.describe(саппорт="Саппорт", дата="Дата ДД.ММ.ГГГГ (необязательно)")
+    @app_commands.describe(саппорт="Упоминание или ID саппорта", дата="Дата ДД.ММ.ГГГГ (необязательно)")
     @app_commands.default_permissions(manage_guild=True)
-    async def prime_add(self, interaction: discord.Interaction, саппорт: discord.Member, дата: str = None):
-        data = await ensure_support(саппорт.id)
+    async def prime_add(self, interaction: discord.Interaction, саппорт: str, дата: str = None):
+        uid = parse_user_id(саппорт)
+        if not uid:
+            return await interaction.response.send_message("❌ Укажите корректное упоминание или ID!", ephemeral=True)
+
+        ok, _ = await validate_target_support(interaction, uid)
+        if not ok:
+            return
+
+        data = await ensure_support(uid)
         slot = data.get("prime_time")
         if not slot:
             return await interaction.response.send_message(
                 "❌ У этого саппорта не назначен прайм-тайм!", ephemeral=True
             )
         target_date = дата.strip() if дата else now_str()
-        await set_activity_minutes(саппорт.id, target_date, slot, 60, is_extra=0)
+        await set_activity_minutes(uid, target_date, slot, 60, is_extra=0)
         await send_log(
             self.bot,
             "reports",
-            f"✅ {interaction.user.mention} вручную засчитал ПТ (`{slot}` за `{target_date}`) саппорту {саппорт.mention}."
+            f"✅ {interaction.user.mention} вручную засчитал ПТ (`{slot}` за `{target_date}`) саппорту <@{uid}>."
         )
         await interaction.response.send_message(
-            f"✅ ПТ `{slot}` за `{target_date}` засчитан (60 мин) для {саппорт.mention}.",
+            f"✅ ПТ `{slot}` за `{target_date}` засчитан (60 мин) для <@{uid}>.",
             ephemeral=True
         )
 
     @app_commands.command(name="miss", description="Вычесть пропуск из отчётов (уменьшить счётчик прогулов)")
-    @app_commands.describe(саппорт="Саппорт", количество="Сколько прогулов вычесть (по умолчанию 1)")
+    @app_commands.describe(саппорт="Упоминание или ID саппорта", количество="Сколько прогулов вычесть (по умолчанию 1)")
     @app_commands.default_permissions(manage_guild=True)
-    async def miss_cmd(self, interaction: discord.Interaction, саппорт: discord.Member, количество: int = 1):
-        data = await ensure_support(саппорт.id)
+    async def miss_cmd(self, interaction: discord.Interaction, саппорт: str, количество: int = 1):
+        uid = parse_user_id(саппорт)
+        if not uid:
+            return await interaction.response.send_message("❌ Укажите корректное упоминание или ID!", ephemeral=True)
+
+        ok, _ = await validate_target_support(interaction, uid)
+        if not ok:
+            return
+
+        data = await ensure_support(uid)
         new_misses = max(0, data.get("weekly_misses", 0) - количество)
-        await update_support_field(саппорт.id, "weekly_misses", new_misses)
+        await update_support_field(uid, "weekly_misses", new_misses)
         await send_log(
             self.bot,
             "reports",
-            f"📉 {interaction.user.mention} вычел `{количество}` прогул(ов) у {саппорт.mention}. Теперь: `[{new_misses}]`."
+            f"📉 {interaction.user.mention} вычел `{количество}` прогул(ов) у <@{uid}>. Теперь: `[{new_misses}]`."
         )
         await interaction.response.send_message(
-            f"✅ У {саппорт.mention} вычтено `{количество}` прогулов. Текущий счётчик: `[{new_misses}]`.",
+            f"✅ У <@{uid}> вычтено `{количество}` прогулов. Текущий счётчик: `[{new_misses}]`.",
             ephemeral=True
         )
 
-    # --- ДРУГОЕ ---
     @app_commands.command(name="swap_as", description="Запросить замену от имени саппорта")
-    @app_commands.describe(саппорт="От чьего имени запросить замену", дата="Дата ДД.ММ.ГГГГ (по умолчанию сегодня)")
+    @app_commands.describe(саппорт="Упоминание или ID саппорта", дата="Дата ДД.ММ.ГГГГ (по умолчанию сегодня)")
     @app_commands.default_permissions(manage_guild=True)
-    async def swap_as_cmd(self, interaction: discord.Interaction, саппорт: discord.Member, дата: str = None):
-        data = await ensure_support(саппорт.id)
+    async def swap_as_cmd(self, interaction: discord.Interaction, саппорт: str, дата: str = None):
+        uid = parse_user_id(саппорт)
+        if not uid:
+            return await interaction.response.send_message("❌ Укажите корректное упоминание или ID!", ephemeral=True)
+
+        ok, _ = await validate_target_support(interaction, uid)
+        if not ok:
+            return
+
+        data = await ensure_support(uid)
         slot = data.get("prime_time")
         if not slot:
             return await interaction.response.send_message(
@@ -474,17 +567,17 @@ class AdminCommands(commands.Cog):
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
                 "INSERT INTO swap_requests (requester_id, date_str, slot) VALUES (?, ?, ?)",
-                (саппорт.id, target_date, slot)
+                (uid, target_date, slot)
             )
             await db.commit()
 
         await send_log(
             self.bot,
             "swaps",
-            f"🔄 Запрошена замена для {саппорт.mention} на слот `{slot}` (`{target_date}`) (создал: {interaction.user.mention})."
+            f"🔄 Запрошена замена для <@{uid}> на слот `{slot}` (`{target_date}`) (создал: {interaction.user.mention})."
         )
         await interaction.response.send_message(
-            f"✅ Запрос на замену от имени {саппорт.mention} (`{slot}`, `{target_date}`) создан!",
+            f"✅ Запрос на замену от имени <@{uid}> (`{slot}`, `{target_date}`) создан!",
             ephemeral=True
         )
 

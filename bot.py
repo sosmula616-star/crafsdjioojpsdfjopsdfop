@@ -1,9 +1,11 @@
 import asyncio
 import discord
 from discord.ext import commands
-from config import BOT_TOKEN
+from config import BOT_TOKEN, MONITOR_TOKEN
 from database import init_db
 from utils.logger import get_bound_log_channel, ensure_all_log_threads
+from utils.permissions import set_monitor_bot_instance, can_use_support_commands
+from monitor_bot import MonitorBot
 
 INTENTS = discord.Intents.default()
 INTENTS.members = True
@@ -14,6 +16,7 @@ EXTENSIONS = (
     "cogs.admin_panel",
     "cogs.reports",
     "cogs.support_profile",
+    "cogs.tickets_listener",
     "cogs.bridge",
 )
 
@@ -29,8 +32,6 @@ class MitaSupportBot(commands.Bot):
 
     async def force_wipe_and_sync(self):
         app_id = self.application_id
-
-        # 1. Принудительно удаляем ВСЕ старые глобальные команды (включая /daily, /activity и старый /help от CrystalAid)
         try:
             global_cmds = await self.http.get_global_commands(app_id)
             for cmd in global_cmds:
@@ -42,7 +43,6 @@ class MitaSupportBot(commands.Bot):
         except Exception as e:
             print(f"[!] Ошибка чтения глобальных команд: {e}")
 
-        # 2. Загружаем актуальные команды на каждый сервер бота
         for guild in self.guilds:
             try:
                 self.tree.clear_commands(guild=guild)
@@ -53,7 +53,7 @@ class MitaSupportBot(commands.Bot):
                 print(f"[!] Ошибка синхронизации на сервере {guild.name}: {e}")
 
     async def on_ready(self):
-        print(f"[+] Бот запущен как {self.user} (ID: {self.user.id})")
+        print(f"[+] Основной бот запущен как {self.user} (ID: {self.user.id})")
         if not self._synced_once:
             self._synced_once = True
             await self.force_wipe_and_sync()
@@ -68,27 +68,30 @@ bot = MitaSupportBot()
 
 @bot.tree.command(name="help", description="Список всех команд бота")
 async def help_cmd(interaction: discord.Interaction):
+    if not await can_use_support_commands(interaction):
+        return
     embed = discord.Embed(
         title="📖 Команды бота",
         color=0x2B2D31,
         description=(
             "**👤 Для саппортов:**\n"
-            "`/support profile` — Открыть свой профиль саппорта\n"
+            "`/support profile [пользователь/ID]` — Открыть свой или чужой профиль саппорта\n"
             "`/prime list` — Таблица всех прайм-таймов\n\n"
             "**🛠️ Админ-панель и настройка:**\n"
-            "`/admin panel @саппорт` — Панель управления саппортом (внутри есть выбор ПТ)\n"
-            "`/set_logs #канал` — Привязать канал логов (сам создаст 9 веток)\n\n"
+            "`/admin panel [саппорт/ID]` — Панель управления саппортом (ПТ, выговоры, отпуск)\n"
+            "`/set_logs #канал` — Привязать канал логов (сам создаст 9 веток)\n"
+            "`/report now [дата]` — Сформировать отчёт активности по запросу\n\n"
             "**🪙 Работа с токенами:**\n"
-            "`/award @саппорт [кол-во] [причина]` — Выдать токены\n"
-            "`/take @саппорт [кол-во] [причина]` — Забрать токены\n\n"
+            "`/award [саппорт/ID] [кол-во] [причина]` — Выдать токены\n"
+            "`/take [саппорт/ID] [кол-во] [причина]` — Забрать токены\n\n"
             "**🕒 Работа с прайм-таймами:**\n"
-            "`/prime set @саппорт` — Открыть интерактивную панель выбора ПТ\n"
-            "`/prime remove @саппорт` — Удалить ПТ у саппорта\n\n"
-            "**📊 Работа с отчётами (для Лизы):**\n"
-            "`/prime add @саппорт [дата]` — Засчитать ПТ (по умолчанию за сегодня)\n"
-            "`/miss @саппорт [кол-во]` — Вычесть прогул из отчётов\n\n"
+            "`/prime set [саппорт/ID]` — Открыть интерактивную панель выбора ПТ\n"
+            "`/prime remove [саппорт/ID]` — Удалить ПТ у саппорта\n\n"
+            "**📊 Работа с отчётами:**\n"
+            "`/prime add [саппорт/ID] [дата]` — Засчитать ПТ (по умолчанию за сегодня)\n"
+            "`/miss [саппорт/ID] [кол-во]` — Вычесть прогул из отчётов\n\n"
             "**✉️ Другое:**\n"
-            "`/swap_as @саппорт [дата]` — Запросить замену от имени саппорта\n"
+            "`/swap_as [саппорт/ID] [дата]` — Запросить замену от имени саппорта\n"
             "`/dm @пользователь [текст]` — Написать в ЛС от имени бота"
         )
     )
@@ -96,8 +99,13 @@ async def help_cmd(interaction: discord.Interaction):
 
 
 async def main():
-    async with bot:
-        await bot.start(BOT_TOKEN)
+    monitor = MonitorBot(main_bot=bot)
+    set_monitor_bot_instance(monitor)
+
+    await asyncio.gather(
+        bot.start(BOT_TOKEN),
+        monitor.start(MONITOR_TOKEN),
+    )
 
 if __name__ == "__main__":
     asyncio.run(main())

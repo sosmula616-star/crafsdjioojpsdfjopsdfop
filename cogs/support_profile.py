@@ -13,6 +13,7 @@ from database import (
 )
 from utils.profile_card import generate_profile_image
 from utils.logger import send_log, resolve_token_emoji
+from utils.permissions import can_use_support_commands, validate_target_support, parse_user_id
 
 
 class ExtraPTSelect(discord.ui.Select):
@@ -126,9 +127,9 @@ class ShopSelect(discord.ui.Select):
         )
 
 
-def build_profile_embed(member: discord.Member) -> discord.Embed:
+def build_profile_embed(member: discord.Member | discord.User) -> discord.Embed:
     embed = discord.Embed(
-        title=f"Профиль саппорта — {member.name}",
+        title=f"Профиль саппорта — {member.display_name}",
         color=0x2B2D31
     )
     embed.set_image(url="attachment://profile.png")
@@ -136,7 +137,7 @@ def build_profile_embed(member: discord.Member) -> discord.Embed:
 
 
 class ProfileView(discord.ui.View):
-    def __init__(self, member: discord.Member):
+    def __init__(self, member: discord.Member | discord.User):
         super().__init__(timeout=600)
         self.member = member
 
@@ -145,7 +146,7 @@ class ProfileView(discord.ui.View):
         await interaction.response.defer()
         data = await ensure_support(self.member.id)
         av_bytes = await self.member.display_avatar.read()
-        card = generate_profile_image(self.member.name, data, av_bytes)
+        card = generate_profile_image(self.member.display_name, data, av_bytes)
         file = discord.File(card, filename="profile.png")
         embed = build_profile_embed(self.member)
         await interaction.edit_original_response(
@@ -157,6 +158,8 @@ class ProfileView(discord.ui.View):
 
     @discord.ui.button(label="⇄ Взять замену", style=discord.ButtonStyle.secondary, row=1)
     async def swap_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await can_use_support_commands(interaction):
+            return
         async with aiosqlite.connect(DB_PATH) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
@@ -192,6 +195,8 @@ class ProfileView(discord.ui.View):
 
     @discord.ui.button(label="🕒 Взять доп. ПТ", style=discord.ButtonStyle.secondary, row=1)
     async def extra_pt_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await can_use_support_commands(interaction):
+            return
         await interaction.response.send_message(
             "⚡ **Выберите часовой слот для дополнительного прайм-тайма на сегодня:**",
             view=ExtraPTView(),
@@ -203,7 +208,7 @@ class ProfileView(discord.ui.View):
         supports = await get_all_supports()
         lines = [
             f"`{s['prime_time']}` — <@{s['user_id']}>"
-            for s in supports if s.get("prime_time")
+            for s in supports if s.get("prime_time") and not s.get("is_exempt")
         ]
         text = "\n".join(lines) if lines else "Нет назначенных прайм-таймов."
         await interaction.response.send_message(f"📅 **Текущие прайм-таймы:**\n{text}", ephemeral=True)
@@ -224,10 +229,14 @@ class ProfileView(discord.ui.View):
 
     @discord.ui.button(label="🎫 Промокод", style=discord.ButtonStyle.secondary, row=2)
     async def promo_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await can_use_support_commands(interaction):
+            return
         await interaction.response.send_modal(PromoModal())
 
     @discord.ui.button(label="🛒 Магазин", style=discord.ButtonStyle.secondary, row=3)
     async def shop_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await can_use_support_commands(interaction):
+            return
         async with aiosqlite.connect(DB_PATH) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute("SELECT * FROM shop_items") as cur:
@@ -240,15 +249,17 @@ class ProfileView(discord.ui.View):
     async def inv_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         async with aiosqlite.connect(DB_PATH) as db:
             db.row_factory = aiosqlite.Row
-            async with db.execute("SELECT * FROM inventory WHERE user_id = ?", (interaction.user.id,)) as cur:
+            async with db.execute("SELECT * FROM inventory WHERE user_id = ?", (self.member.id,)) as cur:
                 rows = await cur.fetchall()
         if not rows:
-            return await interaction.response.send_message("📦 Ваш инвентарь пуст.", ephemeral=True)
+            return await interaction.response.send_message("📦 Инвентарь пуст.", ephemeral=True)
         items_txt = "\n".join(f"• **{r['item_name']}** (куплено `{r['bought_at']}`)" for r in rows)
-        await interaction.response.send_message(f"📦 **Ваш инвентарь:**\n{items_txt}", ephemeral=True)
+        await interaction.response.send_message(f"📦 **Инвентарь <@{self.member.id}>:**\n{items_txt}", ephemeral=True)
 
     @discord.ui.button(label="🌴 Отпуск", style=discord.ButtonStyle.secondary, row=3)
     async def vacation_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await can_use_support_commands(interaction):
+            return
         await interaction.response.send_modal(SupportVacationModal())
 
 
@@ -258,15 +269,34 @@ class SupportProfileCog(commands.Cog):
 
     support_group = app_commands.Group(name="support", description="Команды для саппортов")
 
-    @support_group.command(name="profile", description="Открыть профиль саппорта")
-    async def support_profile(self, interaction: discord.Interaction):
+    @support_group.command(name="profile", description="Открыть свой или чужой профиль саппорта (по упоминанию или ID)")
+    @app_commands.describe(пользователь="Необязательно: упоминание @саппорта или его Discord ID")
+    async def support_profile(self, interaction: discord.Interaction, пользователь: str = None):
+        if not await can_use_support_commands(interaction):
+            return
+
         await interaction.response.defer()
-        data = await ensure_support(interaction.user.id)
-        av_bytes = await interaction.user.display_avatar.read()
-        card = generate_profile_image(interaction.user.name, data, av_bytes)
+
+        if пользователь:
+            target_id = parse_user_id(пользователь)
+            if not target_id:
+                return await interaction.followup.send(
+                    "❌ Укажите корректное упоминание (`@пользователь`) или цифровой Discord ID!",
+                    ephemeral=True
+                )
+        else:
+            target_id = interaction.user.id
+
+        ok, target_obj = await validate_target_support(interaction, target_id, allow_exempt_view=True)
+        if not ok or target_obj is None:
+            return
+
+        data = await ensure_support(target_id)
+        av_bytes = await target_obj.display_avatar.read()
+        card = generate_profile_image(target_obj.display_name, data, av_bytes)
         file = discord.File(card, filename="profile.png")
-        embed = build_profile_embed(interaction.user)
-        view = ProfileView(interaction.user)
+        embed = build_profile_embed(target_obj)
+        view = ProfileView(target_obj)
         await interaction.followup.send(
             embed=embed,
             file=file,
