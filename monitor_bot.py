@@ -424,7 +424,23 @@ class MonitorBot:
                         })
 
                     seq = None
-
+async for msg in ws:
+    if msg.type == aiohttp.WSMsgType.TEXT:
+        payload = json.loads(msg.data)
+        op = payload.get("op")
+        
+        # Отправляем статус "в сети" сразу после READY
+        if op == 0 and payload.get("t") == "READY":
+            print("[Monitor] Получен READY, отправляю статус ONLINE")
+            await ws.send_json({
+                "op": 3,  # PRESENCE_UPDATE
+                "d": {
+                    "status": "online",
+                    "since": 0,
+                    "activities": [],
+                    "afk": False
+                }
+            })
                     async def heartbeat_sender():
                         while not ws.closed and not self._closed:
                             await asyncio.sleep(hb_interval)
