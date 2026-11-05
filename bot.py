@@ -16,7 +16,6 @@ EXTENSIONS = (
     "cogs.admin_panel",
     "cogs.reports",
     "cogs.support_profile",
-    "cogs.tickets_listener",
     "cogs.bridge",
 )
 
