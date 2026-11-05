@@ -12,8 +12,12 @@ MAIN_GUILD_ID = int(os.getenv("MAIN_GUILD_ID", "254958490676625408"))
 LOG_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID", "0"))
 TOKEN_EMOJI = os.getenv("TOKEN_EMOJI", "<:SupportToken:1425839493750984774>")
 
+# Роли на сервере 254958490676625408:
+# SUPPORT_ROLE_ID — роль саппорта (доступ к /support profile, /prime list; им считается время в прихожих)
+# CURATOR_ROLE_IDS — роли кураторов (дают доступ к редактированию/админ-командам; норма в прихожих им не считается)
 SUPPORT_ROLE_ID = 848876547792306217
-EXEMPT_ROLE_IDS = {848876541009592341, 1234034864228012095}
+CURATOR_ROLE_IDS = {848876541009592341, 1234034864228012095}
+EXEMPT_ROLE_IDS = CURATOR_ROLE_IDS
 
 LOBBY_CHANNELS = {
     1479082408543522917: "1 Прихожая",

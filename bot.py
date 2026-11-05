@@ -77,20 +77,19 @@ async def help_cmd(interaction: discord.Interaction):
             "**👤 Для саппортов:**\n"
             "`/support profile [пользователь/ID]` — Открыть свой или чужой профиль саппорта\n"
             "`/prime list` — Таблица всех прайм-таймов\n\n"
-            "**🛠️ Админ-панель и настройка:**\n"
+            "**🛠️ Команды Кураторов (редактирование и управление):**\n"
             "`/admin panel [саппорт/ID]` — Панель управления саппортом (ПТ, выговоры, отпуск)\n"
             "`/set_logs #канал` — Привязать канал логов (сам создаст 9 веток)\n"
             "`/report now [дата]` — Сформировать отчёт активности по запросу\n\n"
-            "**🪙 Работа с токенами:**\n"
+            "**🪙 Работа с токенами (для Кураторов):**\n"
             "`/award [саппорт/ID] [кол-во] [причина]` — Выдать токены\n"
             "`/take [саппорт/ID] [кол-во] [причина]` — Забрать токены\n\n"
-            "**🕒 Работа с прайм-таймами:**\n"
+            "**🕒 Работа с прайм-таймами (для Кураторов):**\n"
             "`/prime set [саппорт/ID]` — Открыть интерактивную панель выбора ПТ\n"
-            "`/prime remove [саппорт/ID]` — Удалить ПТ у саппорта\n\n"
-            "**📊 Работа с отчётами:**\n"
+            "`/prime remove [саппорт/ID]` — Удалить ПТ у саппорта\n"
             "`/prime add [саппорт/ID] [дата]` — Засчитать ПТ (по умолчанию за сегодня)\n"
             "`/miss [саппорт/ID] [кол-во]` — Вычесть прогул из отчётов\n\n"
-            "**✉️ Другое:**\n"
+            "**✉️ Другое (для Кураторов):**\n"
             "`/swap_as [саппорт/ID] [дата]` — Запросить замену от имени саппорта\n"
             "`/dm @пользователь [текст]` — Написать в ЛС от имени бота"
         )
@@ -102,23 +101,23 @@ async def main():
     monitor = MonitorBot(main_bot=bot)
     set_monitor_bot_instance(monitor)
 
-    async def start_main():
+    async def start_main_bot():
+        clean_token = (BOT_TOKEN or "").strip().strip('"').strip("'")
         try:
-            await bot.start(BOT_TOKEN.strip())
+            await bot.start(clean_token)
         except discord.LoginFailure:
-            print("❌ [ОШИБКА] Неверный токен ОСНОВНОГО бота (DISCORD_TOKEN)! Сбросьте его в Discord Developer Portal.")
-            raise
+            print("❌ [ОШИБКА] Неверный токен ОСНОВНОГО бота (DISCORD_TOKEN)! Проверьте .env")
+            await bot.close()
 
-    async def start_monitor():
+    async def start_monitor_client():
         try:
-            await monitor.start(MONITOR_TOKEN.strip())
-        except discord.LoginFailure:
-            print("❌ [ОШИБКА] Неверный токен ВТОРОГО бота-монитора (MONITOR_TOKEN)! Сбросьте его в Discord Developer Portal.")
-            except_err = True
+            await monitor.start(MONITOR_TOKEN)
+        except Exception as e:
+            print(f"❌ [ОШИБКА МОНИТОРА]: {e}")
 
     await asyncio.gather(
-        start_main(),
-        start_monitor(),
+        start_main_bot(),
+        start_monitor_client(),
     )
 
 if __name__ == "__main__":

@@ -7,7 +7,7 @@ import aiosqlite
 from config import TIMEZONE, ALL_SLOTS, MIN_PRIME_MINUTES
 from database import DB_PATH, get_all_supports, update_support_field, now_str
 from utils.logger import send_log
-from utils.permissions import check_support_status
+from utils.permissions import check_support_status, can_use_curator_commands
 
 tz = pytz.timezone(TIMEZONE)
 CODE_BLOCK = chr(96) * 3
@@ -67,13 +67,14 @@ class ReportsCog(commands.Cog):
         self.midnight_report_task.cancel()
         self.pt_reminder_task.cancel()
 
-    @report_group.command(name="now", description="Сформировать и отправить отчёт активности по запросу")
+    @report_group.command(name="now", description="Сформировать и отправить отчёт активности по запросу (для Кураторов)")
     @app_commands.describe(
         дата="За какую дату ДД.ММ.ГГГГ (по умолчанию за сегодня)",
         в_ветку_логов="Также продублировать отчёт в ветку #Отчёты (по умолчанию Да)"
     )
-    @app_commands.default_permissions(manage_guild=True)
     async def report_now_cmd(self, interaction: discord.Interaction, дата: str = None, в_ветку_логов: bool = True):
+        if not await can_use_curator_commands(interaction):
+            return
         await interaction.response.defer(ephemeral=False)
         target_date = дата.strip() if дата else now_str()
         rep_embed, truant_embed = await self.generate_and_send_report(
@@ -220,8 +221,8 @@ class ReportsCog(commands.Cog):
 
         for sup in supports:
             uid = sup["user_id"]
-            has_sup, has_exempt, _ = await check_support_status(self.bot, uid)
-            if has_exempt or sup.get("is_exempt") == 1 or not has_sup:
+            has_sup, has_cur, _ = await check_support_status(self.bot, uid)
+            if has_cur or sup.get("is_exempt") == 1 or not has_sup:
                 continue
 
             slot = sup.get("prime_time")
@@ -273,8 +274,8 @@ class ReportsCog(commands.Cog):
             if r.get("is_extra") == 1:
                 s = r["slot"]
                 uid = r["user_id"]
-                has_sup, has_exempt, _ = await check_support_status(self.bot, uid)
-                if not has_exempt and has_sup and s in slot_lines:
+                has_sup, has_cur, _ = await check_support_status(self.bot, uid)
+                if not has_cur and has_sup and s in slot_lines:
                     slot_lines[s].append(f"[✅ - {r['minutes']}] <@{uid}> ⚡")
 
         report_embed = discord.Embed(

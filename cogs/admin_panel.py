@@ -16,7 +16,12 @@ from database import (
 )
 import aiosqlite
 from utils.logger import send_log, resolve_token_emoji, ensure_all_log_threads
-from utils.permissions import can_use_support_commands, validate_target_support, parse_user_id
+from utils.permissions import (
+    can_use_support_commands,
+    can_use_curator_commands,
+    validate_target_support,
+    parse_user_id
+)
 
 def build_admin_embed(user_obj: discord.Member | discord.User, data: dict, emoji_str: str) -> discord.Embed:
     embed = discord.Embed(
@@ -86,6 +91,8 @@ class SlotSelect(discord.ui.Select):
         super().__init__(placeholder=placeholder, min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
+        if not await can_use_curator_commands(interaction):
+            return
         chosen_slot = self.values[0]
         await ensure_support(self.target.id)
         await update_support_field(self.target.id, "prime_time", chosen_slot)
@@ -132,6 +139,8 @@ class PrimeTimePickerView(discord.ui.View):
 
     @discord.ui.button(label="Снять прайм-тайм", style=discord.ButtonStyle.danger, emoji="🗑️", row=2)
     async def clear_pt_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await can_use_curator_commands(interaction):
+            return
         await ensure_support(self.target.id)
         await update_support_field(self.target.id, "prime_time", None)
         await send_log(
@@ -155,6 +164,8 @@ class PrimeTimePickerView(discord.ui.View):
 
     @discord.ui.button(label="⬅️ В админ-панель", style=discord.ButtonStyle.secondary, row=2)
     async def back_to_admin_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await can_use_curator_commands(interaction):
+            return
         data = await ensure_support(self.target.id)
         view = AdminPanelView(self.target, data)
         em = resolve_token_emoji(interaction.client)
@@ -243,10 +254,14 @@ class AdminPanelView(discord.ui.View):
 
     @discord.ui.button(label="Дата принятия", style=discord.ButtonStyle.primary, row=0)
     async def hire_date_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await can_use_curator_commands(interaction):
+            return
         await interaction.response.send_modal(HireDateModal(self.target, self))
 
     @discord.ui.button(label="Исп.срок", style=discord.ButtonStyle.secondary, row=0)
     async def probation_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await can_use_curator_commands(interaction):
+            return
         data = await ensure_support(self.target.id)
         if data.get("probation_until"):
             await update_support_field(self.target.id, "probation_until", None)
@@ -265,6 +280,8 @@ class AdminPanelView(discord.ui.View):
 
     @discord.ui.button(label="Отпуск", style=discord.ButtonStyle.secondary, row=0)
     async def vacation_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await can_use_curator_commands(interaction):
+            return
         data = await ensure_support(self.target.id)
         if data.get("vacation_until"):
             await update_support_field(self.target.id, "vacation_until", None)
@@ -280,6 +297,8 @@ class AdminPanelView(discord.ui.View):
 
     @discord.ui.button(label="🕒 Прайм-тайм", style=discord.ButtonStyle.primary, row=1)
     async def pt_picker_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await can_use_curator_commands(interaction):
+            return
         data = await ensure_support(self.target.id)
         supports = await get_all_supports()
         counts = {s: 0 for s in ALL_SLOTS}
@@ -293,6 +312,8 @@ class AdminPanelView(discord.ui.View):
 
     @discord.ui.button(label="+1 Выговор", style=discord.ButtonStyle.secondary, emoji="⚠️", row=1)
     async def add_warn_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await can_use_curator_commands(interaction):
+            return
         new_w = await change_warns(self.target.id, delta=1)
         await send_log(
             interaction.client,
@@ -305,6 +326,8 @@ class AdminPanelView(discord.ui.View):
 
     @discord.ui.button(label="-1 Выговор", style=discord.ButtonStyle.secondary, row=1)
     async def rem_warn_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await can_use_curator_commands(interaction):
+            return
         new_w = await change_warns(self.target.id, delta=-1)
         await send_log(
             interaction.client,
@@ -317,6 +340,8 @@ class AdminPanelView(discord.ui.View):
 
     @discord.ui.button(label="Удалить из БД", style=discord.ButtonStyle.danger, row=2)
     async def delete_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await can_use_curator_commands(interaction):
+            return
         await delete_support(self.target.id)
         await send_log(
             interaction.client,
@@ -336,13 +361,14 @@ class AdminCommands(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    admin_group = app_commands.Group(name="admin", description="Админ-команды управления саппортами")
+    admin_group = app_commands.Group(name="admin", description="Команды кураторов для управления саппортами")
     prime_group = app_commands.Group(name="prime", description="Управление прайм-таймами")
 
     @app_commands.command(name="set_logs", description="Привязать канал #логи (бот сам создаст в нём все 9 веток)")
     @app_commands.describe(канал="Текстовый канал для логов и отчётов")
-    @app_commands.default_permissions(manage_guild=True)
     async def set_logs_cmd(self, interaction: discord.Interaction, канал: discord.TextChannel):
+        if not await can_use_curator_commands(interaction):
+            return
         await interaction.response.defer(ephemeral=True)
         threads = await ensure_all_log_threads(self.bot, канал)
         mentions = ", ".join(t.mention for t in threads.values())
@@ -351,10 +377,11 @@ class AdminCommands(commands.Cog):
             ephemeral=True
         )
 
-    @admin_group.command(name="panel", description="Управление выбранным саппортом (по упоминанию или ID)")
+    @admin_group.command(name="panel", description="Управление выбранным саппортом (только для Кураторов)")
     @app_commands.describe(саппорт="Упоминание @саппорта или его Discord ID")
-    @app_commands.default_permissions(manage_guild=True)
     async def admin_panel(self, interaction: discord.Interaction, саппорт: str):
+        if not await can_use_curator_commands(interaction):
+            return
         uid = parse_user_id(саппорт)
         if not uid:
             return await interaction.response.send_message("❌ Укажите корректное упоминание или ID!", ephemeral=True)
@@ -369,10 +396,11 @@ class AdminCommands(commands.Cog):
         embed = build_admin_embed(target_obj, data, em)
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
-    @app_commands.command(name="award", description="Выдать токены саппорту (по упоминанию или ID)")
+    @app_commands.command(name="award", description="Выдать токены саппорту (только для Кураторов)")
     @app_commands.describe(саппорт="Упоминание или ID саппорта", количество="Сколько токенов", причина="Причина выдачи")
-    @app_commands.default_permissions(manage_guild=True)
     async def award_cmd(self, interaction: discord.Interaction, саппорт: str, количество: int, причина: str = "Не указана"):
+        if not await can_use_curator_commands(interaction):
+            return
         uid = parse_user_id(саппорт)
         if not uid:
             return await interaction.response.send_message("❌ Укажите корректное упоминание или ID!", ephemeral=True)
@@ -395,10 +423,11 @@ class AdminCommands(commands.Cog):
             ephemeral=True
         )
 
-    @app_commands.command(name="take", description="Забрать токены у саппорта (по упоминанию или ID)")
+    @app_commands.command(name="take", description="Забрать токены у саппорта (только для Кураторов)")
     @app_commands.describe(саппорт="Упоминание или ID саппорта", количество="Сколько токенов", причина="Причина")
-    @app_commands.default_permissions(manage_guild=True)
     async def take_cmd(self, interaction: discord.Interaction, саппорт: str, количество: int, причина: str = "Не указана"):
+        if not await can_use_curator_commands(interaction):
+            return
         uid = parse_user_id(саппорт)
         if not uid:
             return await interaction.response.send_message("❌ Укажите корректное упоминание или ID!", ephemeral=True)
@@ -421,10 +450,11 @@ class AdminCommands(commands.Cog):
             ephemeral=True
         )
 
-    @prime_group.command(name="set", description="Открыть панель назначения прайм-тайма саппорту (по упоминанию или ID)")
+    @prime_group.command(name="set", description="Открыть панель назначения прайм-тайма саппорту (только для Кураторов)")
     @app_commands.describe(саппорт="Упоминание или ID саппорта")
-    @app_commands.default_permissions(manage_guild=True)
     async def prime_set(self, interaction: discord.Interaction, саппорт: str):
+        if not await can_use_curator_commands(interaction):
+            return
         uid = parse_user_id(саппорт)
         if not uid:
             return await interaction.response.send_message("❌ Укажите корректное упоминание или ID!", ephemeral=True)
@@ -444,10 +474,11 @@ class AdminCommands(commands.Cog):
         embed = await build_pt_picker_embed(target_obj, data.get("prime_time"))
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
-    @prime_group.command(name="remove", description="Удалить прайм-тайм у саппорта (по упоминанию или ID)")
+    @prime_group.command(name="remove", description="Удалить прайм-тайм у саппорта (только для Кураторов)")
     @app_commands.describe(саппорт="Упоминание или ID саппорта")
-    @app_commands.default_permissions(manage_guild=True)
     async def prime_remove(self, interaction: discord.Interaction, саппорт: str):
+        if not await can_use_curator_commands(interaction):
+            return
         uid = parse_user_id(саппорт)
         if not uid:
             return await interaction.response.send_message("❌ Укажите корректное упоминание или ID!", ephemeral=True)
@@ -490,10 +521,11 @@ class AdminCommands(commands.Cog):
 
         await interaction.response.send_message(embed=embed)
 
-    @prime_group.command(name="add", description="Засчитать ПТ саппорту (по умолчанию за сегодня)")
+    @prime_group.command(name="add", description="Засчитать ПТ саппорту (только для Кураторов)")
     @app_commands.describe(саппорт="Упоминание или ID саппорта", дата="Дата ДД.ММ.ГГГГ (необязательно)")
-    @app_commands.default_permissions(manage_guild=True)
     async def prime_add(self, interaction: discord.Interaction, саппорт: str, дата: str = None):
+        if not await can_use_curator_commands(interaction):
+            return
         uid = parse_user_id(саппорт)
         if not uid:
             return await interaction.response.send_message("❌ Укажите корректное упоминание или ID!", ephemeral=True)
@@ -520,10 +552,11 @@ class AdminCommands(commands.Cog):
             ephemeral=True
         )
 
-    @app_commands.command(name="miss", description="Вычесть пропуск из отчётов (уменьшить счётчик прогулов)")
+    @app_commands.command(name="miss", description="Вычесть пропуск из отчётов (только для Кураторов)")
     @app_commands.describe(саппорт="Упоминание или ID саппорта", количество="Сколько прогулов вычесть (по умолчанию 1)")
-    @app_commands.default_permissions(manage_guild=True)
     async def miss_cmd(self, interaction: discord.Interaction, саппорт: str, количество: int = 1):
+        if not await can_use_curator_commands(interaction):
+            return
         uid = parse_user_id(саппорт)
         if not uid:
             return await interaction.response.send_message("❌ Укажите корректное упоминание или ID!", ephemeral=True)
@@ -545,10 +578,11 @@ class AdminCommands(commands.Cog):
             ephemeral=True
         )
 
-    @app_commands.command(name="swap_as", description="Запросить замену от имени саппорта")
+    @app_commands.command(name="swap_as", description="Запросить замену от имени саппорта (только для Кураторов)")
     @app_commands.describe(саппорт="Упоминание или ID саппорта", дата="Дата ДД.ММ.ГГГГ (по умолчанию сегодня)")
-    @app_commands.default_permissions(manage_guild=True)
     async def swap_as_cmd(self, interaction: discord.Interaction, саппорт: str, дата: str = None):
+        if not await can_use_curator_commands(interaction):
+            return
         uid = parse_user_id(саппорт)
         if not uid:
             return await interaction.response.send_message("❌ Укажите корректное упоминание или ID!", ephemeral=True)
@@ -581,10 +615,11 @@ class AdminCommands(commands.Cog):
             ephemeral=True
         )
 
-    @app_commands.command(name="dm", description="Отправить сообщение в ЛС от имени бота")
+    @app_commands.command(name="dm", description="Отправить сообщение в ЛС от имени бота (только для Кураторов)")
     @app_commands.describe(пользователь="Кому отправить", текст="Текст сообщения")
-    @app_commands.default_permissions(manage_guild=True)
     async def dm_cmd(self, interaction: discord.Interaction, пользователь: discord.Member, текст: str):
+        if not await can_use_curator_commands(interaction):
+            return
         try:
             await пользователь.send(текст)
             await interaction.response.send_message(
