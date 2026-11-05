@@ -102,9 +102,23 @@ async def main():
     monitor = MonitorBot(main_bot=bot)
     set_monitor_bot_instance(monitor)
 
+    async def start_main():
+        try:
+            await bot.start(BOT_TOKEN.strip())
+        except discord.LoginFailure:
+            print("❌ [ОШИБКА] Неверный токен ОСНОВНОГО бота (DISCORD_TOKEN)! Сбросьте его в Discord Developer Portal.")
+            raise
+
+    async def start_monitor():
+        try:
+            await monitor.start(MONITOR_TOKEN.strip())
+        except discord.LoginFailure:
+            print("❌ [ОШИБКА] Неверный токен ВТОРОГО бота-монитора (MONITOR_TOKEN)! Сбросьте его в Discord Developer Portal.")
+            except_err = True
+
     await asyncio.gather(
-        bot.start(BOT_TOKEN),
-        monitor.start(MONITOR_TOKEN),
+        start_main(),
+        start_monitor(),
     )
 
 if __name__ == "__main__":
