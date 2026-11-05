@@ -55,11 +55,18 @@ class MonitorBot:
         if not self.token:
             return False
         self.is_user_token = True
-        async with self.session.get("https://discord.com/api/v10/users/@me", headers=self._headers()) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                print(f"[+] Монитор-аккаунт авторизован как пользователь: {data.get('username')} (ID: {data.get('id')})")
-                return True
+        try:
+            async with self.session.get("https://discord.com/api/v10/users/@me", headers=self._headers()) as resp:
+                print(f"[Monitor Auth] Проверка токена: HTTP {resp.status}")
+                if resp.status == 200:
+                    data = await resp.json()
+                    print(f"[+] Монитор-аккаунт: {data.get('username')} (ID: {data.get('id')})")
+                    return True
+        except Exception as e:
+            print(f"[Monitor Auth] Ошибка подключения: {e}")
+
+        print("❌ [МОНИТОР] Токен недействителен или заблокирован (401)!")
+        return False
 
         self.is_user_token = False
         async with self.session.get("https://discord.com/api/v10/users/@me", headers=self._headers()) as resp:
@@ -158,19 +165,23 @@ class MonitorBot:
         while not self._closed:
             try:
                 if self.session and not self.session.closed:
-                    # Обработка выговоров
+                    # Проверка канала выговоров
                     async with self.session.get(reprimand_url, headers=self._headers()) as resp:
                         if resp.status == 200:
                             for msg in reversed(await resp.json()):
                                 await self._handle_raw_message(msg)
+                        elif resp.status in (401, 403):
+                            print(f"[Monitor Poll] Ошибка доступа к каналу выговоров: {resp.status} (нет прав или токен заблокирован)")
                     
-                    # Обработка закрытых тикетов
+                    # Проверка канала тикетов
                     async with self.session.get(tickets_url, headers=self._headers()) as resp:
                         if resp.status == 200:
                             for msg in reversed(await resp.json()):
                                 await self._handle_ticket_message(msg)
+                        elif resp.status in (401, 403):
+                            print(f"[Monitor Poll] Ошибка доступа к каналу тикетов: {resp.status} (нет прав или токен заблокирован)")
             except Exception as e:
-                print(f"[Monitor Poll] Ошибка при опросе каналов: {e}")
+                print(f"[Monitor Poll] Критическая ошибка: {e}")
             
             await asyncio.sleep(30)
 
@@ -434,7 +445,10 @@ class MonitorBot:
                                 "threads": False,
                                 "activities": True,
                                 "members": [],
-                                "channels": {},
+                                "channels": {
+                                    str(REPRIMAND_CHANNEL_ID): [[0, 99]],
+                                    str(TICKETS_CHANNEL_ID): [[0, 99]]
+                                },
                             }
                         })
 
@@ -457,14 +471,21 @@ class MonitorBot:
                                 
                                 if op == 0:
                                     t = payload.get("t", "")
-                                    if t == "READY":
+                                                                        if t == "READY":
                                         print("[Monitor Gateway] Получено событие READY, устанавливаю статус 'online'")
                                         await ws.send_json({
                                             "op": 3,
                                             "d": {
                                                 "status": "online",
                                                 "since": 0,
-                                                "activities": [],
+                                                "activities": [
+                                                    {
+                                                        "name": "Custom Status",
+                                                        "type": 4,
+                                                        "state": "Мониторинг",
+                                                        "emoji": {"name": "🟢"}
+                                                    }
+                                                ],
                                                 "afk": False
                                             }
                                         })
