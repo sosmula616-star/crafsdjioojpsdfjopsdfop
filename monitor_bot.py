@@ -26,12 +26,11 @@ from database import (
 )
 from utils.logger import send_log
 
-
 class MonitorBot:
     def __init__(self, main_bot=None):
         self.main_bot = main_bot
         self.token = ""
-        self.is_user_token = True
+        self.is_bot = True  # Всегда True для бот-токена
         self.session: aiohttp.ClientSession | None = None
         self.ws: aiohttp.ClientWebSocketResponse | None = None
         self._closed = False
@@ -41,41 +40,26 @@ class MonitorBot:
         self.name_to_id: dict[str, int] = {}
         self.seq = None
 
-    def _auth_header(self) -> str:
-        return self.token if self.is_user_token else f"Bot {self.token}"
-
     def _headers(self) -> dict[str, str]:
         return {
-            "Authorization": self._auth_header(),
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Authorization": f"Bot {self.token}",
             "Content-Type": "application/json",
         }
 
     async def _detect_token_mode(self) -> bool:
         if not self.token:
             return False
-        self.is_user_token = True
         try:
             async with self.session.get("https://discord.com/api/v10/users/@me", headers=self._headers()) as resp:
-                print(f"[Monitor Auth] Проверка токена: HTTP {resp.status}")
                 if resp.status == 200:
                     data = await resp.json()
-                    print(f"[+] Монитор-аккаунт: {data.get('username')} (ID: {data.get('id')})")
+                    print(f"[+] Монитор авторизован как бот: {data.get('username')} (ID: {data.get('id')})")
                     return True
+                elif resp.status == 401:
+                    print("❌ [МОНИТОР] Токен недействителен (401 Unauthorized)! Проверьте MONITOR_TOKEN в .env")
+                    return False
         except Exception as e:
             print(f"[Monitor Auth] Ошибка подключения: {e}")
-
-        print("❌ [МОНИТОР] Токен недействителен или заблокирован (401)!")
-        return False
-
-        self.is_user_token = False
-        async with self.session.get("https://discord.com/api/v10/users/@me", headers=self._headers()) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                print(f"[+] Монитор авторизован как бот: {data.get('username')} (ID: {data.get('id')})")
-                return True
-
-        print("❌ [МОНИТОР] Токен MONITOR_TOKEN недействителен (401 Unauthorized)! Проверьте токен в .env")
         return False
 
     async def get_member_roles_on_main(self, user_id: int) -> tuple[set[int], dict | None]:
@@ -165,23 +149,23 @@ class MonitorBot:
         while not self._closed:
             try:
                 if self.session and not self.session.closed:
-                    # Проверка канала выговоров
+                    # Обработка выговоров
                     async with self.session.get(reprimand_url, headers=self._headers()) as resp:
                         if resp.status == 200:
                             for msg in reversed(await resp.json()):
                                 await self._handle_raw_message(msg)
                         elif resp.status in (401, 403):
-                            print(f"[Monitor Poll] Ошибка доступа к каналу выговоров: {resp.status} (нет прав или токен заблокирован)")
+                            print(f"[Monitor Poll] Нет доступа к каналу выговоров: {resp.status}")
                     
-                    # Проверка канала тикетов
+                    # Обработка закрытых тикетов
                     async with self.session.get(tickets_url, headers=self._headers()) as resp:
                         if resp.status == 200:
                             for msg in reversed(await resp.json()):
                                 await self._handle_ticket_message(msg)
                         elif resp.status in (401, 403):
-                            print(f"[Monitor Poll] Ошибка доступа к каналу тикетов: {resp.status} (нет прав или токен заблокирован)")
+                            print(f"[Monitor Poll] Нет доступа к каналу тикетов: {resp.status}")
             except Exception as e:
-                print(f"[Monitor Poll] Критическая ошибка: {e}")
+                print(f"[Monitor Poll] Ошибка: {e}")
             
             await asyncio.sleep(30)
 
@@ -209,18 +193,6 @@ class MonitorBot:
             target_name = m_name.group(1).strip().lstrip("@").lower()
             if target_name in self.name_to_id:
                 return self.name_to_id[target_name]
-            search_url = f"https://discord.com/api/v10/guilds/{MAIN_GUILD_ID}/members/search?query={target_name}&limit=5"
-            try:
-                async with self.session.get(search_url, headers=self._headers()) as resp:
-                    if resp.status == 200:
-                        found = await resp.json()
-                        for m in found:
-                            self._cache_member_payload(m)
-                            u = m.get("user", {})
-                            if u.get("id"):
-                                return int(u["id"])
-            except Exception:
-                pass
         return None
 
     async def _handle_raw_message(self, msg_data: dict):
@@ -265,8 +237,7 @@ class MonitorBot:
                 print(f"[Warns] Выдан выговор саппорту {target_id}. Теперь: {new_warns}/{MAX_WARNS}")
                 if self.main_bot:
                     await send_log(
-                        self.main_bot,
-                        "warns",
+                        self.main_bot, "warns",
                         f"⚠️ Авто-фиксация: Саппорт <@{target_id}> получил выговор (Причина: `{reason}`). Теперь у него **`{new_warns}/{MAX_WARNS}`** выговоров."
                     )
             elif is_remove:
@@ -274,8 +245,7 @@ class MonitorBot:
                 print(f"[Warns] Снят выговор у саппорта {target_id}. Теперь: {new_warns}/{MAX_WARNS}")
                 if self.main_bot:
                     await send_log(
-                        self.main_bot,
-                        "warns",
+                        self.main_bot, "warns",
                         f"✅ Авто-фиксация: У саппорта <@{target_id}> снят выговор. Теперь у него **`{new_warns}/{MAX_WARNS}`** выговоров."
                     )
 
@@ -298,8 +268,7 @@ class MonitorBot:
                 return self.name_to_id[name_low]
 
             try:
-                url = (f"https://discord.com/api/v10/guilds/{MAIN_GUILD_ID}"
-                       f"/members/search?query={name}&limit=5")
+                url = (f"https://discord.com/api/v10/guilds/{MAIN_GUILD_ID}/members/search?query={name}&limit=5")
                 async with self.session.get(url, headers=self._headers()) as resp:
                     if resp.status == 200:
                         for m in await resp.json():
@@ -327,10 +296,7 @@ class MonitorBot:
                 continue
 
             ticket_id_match = re.search(r"ID тикета[:\s]*\n?\s*(\d+)", full_text, re.IGNORECASE)
-            ticket_key = (
-                f"ticket_{ticket_id_match.group(1)}"
-                if ticket_id_match else f"ticket_msg_{msg_id}"
-            )
+            ticket_key = f"ticket_{ticket_id_match.group(1)}" if ticket_id_match else f"ticket_msg_{msg_id}"
 
             accepted_section = ""
             for f in embed.get("fields", []):
@@ -356,17 +322,16 @@ class MonitorBot:
 
     async def _handle_gateway_dispatch(self, event_type: str, data: dict):
         if event_type == "READY":
+            print("[+] Монитор успешно подключен к шлюзу Discord (READY)")
             guilds = data.get("guilds") or []
             for g in guilds:
                 if int(g.get("id", 0)) == MAIN_GUILD_ID:
-                    for m in g.get("members", []):
-                        self._cache_member_payload(m)
+                    print(f"[+] Найден основной сервер {MAIN_GUILD_ID} в списке гильдий")
                     for vs in g.get("voice_states", []):
                         uid = int(vs.get("user_id", 0))
                         cid = vs.get("channel_id")
                         if uid and cid:
                             self.voice_states[uid] = int(cid)
-                    print(f"[+] Монитор загрузил сервер {MAIN_GUILD_ID}: в голосовых каналах сейчас {len(self.voice_states)} чел.")
 
         elif event_type == "GUILD_CREATE":
             if int(data.get("id", 0)) == MAIN_GUILD_ID:
@@ -377,7 +342,7 @@ class MonitorBot:
                     cid = vs.get("channel_id")
                     if uid and cid:
                         self.voice_states[uid] = int(cid)
-                print(f"[+] Монитор синхронизировал GUILD_CREATE для {MAIN_GUILD_ID} (в войсе: {len(self.voice_states)} чел.)")
+                print(f"[+] Синхронизирован сервер {MAIN_GUILD_ID} (в голосовых: {len(self.voice_states)} чел.)")
 
         elif event_type == "VOICE_STATE_UPDATE":
             guild_id = int(data.get("guild_id") or 0)
@@ -399,66 +364,40 @@ class MonitorBot:
         elif event_type in ("MESSAGE_CREATE", "MESSAGE_UPDATE"):
             await self._handle_raw_message(data)
             await self._handle_ticket_message(data)
-# После получения READY
-await ws.send(json.dumps({
-    "op": 3,
-    "d": {
-        "status": "online",  # или "idle", "dnd"
-        "afk": False,
-        "activities": [{
-            "name": "Custom Status",
-            "type": 4,
-            "state": "Мониторинг"
-        }]
-    }
-}))
+
     async def _gateway_loop(self):
         gateway_url = "wss://gateway.discord.gg/?v10&encoding=json"
+        
+        # Интенты для бота: GUILDS (1) + GUILD_MEMBERS (2) + GUILD_VOICE_STATES (128) + 
+        # GUILD_MESSAGES (512) + MESSAGE_CONTENT (32768) + GUILD_PRESENCES (256)
+        bot_intents = 1 | 2 | 128 | 512 | 32768 | 256 
+
         while not self._closed:
             try:
-                async with self.session.ws_connect(gateway_url, max_msg_size=0, heartbeat=30.0) as ws:
+                async with self.session.ws_connect(gateway_url, max_msg_size=0) as ws:
                     self.ws = ws
                     hello = await ws.receive_json()
                     hb_interval = hello.get("d", {}).get("heartbeat_interval", 41250) / 1000.0
 
-                    if self.is_user_token:
-                        identify_payload = {
-                            "op": 2,
-                            "d": {
-                                "token": self.token,
-                                "capabilities": 16381,
-                                "properties": {
-                                    "os": "Windows",
-                                    "browser": "Chrome",
-                                    "device": "",
-                                    "system_locale": "ru-RU",
-                                },
-                                "presence": {"status": "online", "since": 0, "activities": [], "afk": False},
-                                "compress": False,
+                    identify_payload = {
+                        "op": 2,
+                        "d": {
+                            "token": self.token,
+                            "intents": bot_intents,
+                            "properties": {
+                                "os": "linux",
+                                "browser": "monitor_bot",
+                                "device": "monitor_bot"
+                            },
+                            "presence": {
+                                "status": "online",
+                                "since": 0,
+                                "activities": [{"name": "Мониторинг сервера", "type": 4, "state": "Сбор статистики"}],
+                                "afk": False
                             }
                         }
-                    else:
-                        identify_payload = {
-                            "op": 2,
-                            "d": {
-                                "token": self.token,
-                                "intents": 33411,
-                                "properties": {"os": "linux", "browser": "discord.py", "device": "discord.py"},
-                            }
-                        }
+                    }
                     await ws.send_json(identify_payload)
-
-                    if self.is_user_token:
-await ws.send_json({
-    "op": 14,
-    "d": {
-        "guild_id": str(MAIN_GUILD_ID),
-        "channels": {
-            str(REPRIMAND_CHANNEL_ID): [[0, 99]],
-            str(TICKETS_CHANNEL_ID): [[0, 99]]
-        }
-    }
-})
 
                     self.seq = None
 
@@ -478,41 +417,23 @@ await ws.send_json({
                                     self.seq = payload["s"]
                                 
                                 if op == 0:
-                                    t = payload.get("t", "")
-                                                                        if t == "READY":
-                                        print("[Monitor Gateway] Получено событие READY, устанавливаю статус 'online'")
-                                        await ws.send_json({
-                                            "op": 3,
-                                            "d": {
-                                                "status": "online",
-                                                "since": 0,
-                                                "activities": [
-                                                    {
-                                                        "name": "Custom Status",
-                                                        "type": 4,
-                                                        "state": "Мониторинг",
-                                                        "emoji": {"name": "🟢"}
-                                                    }
-                                                ],
-                                                "afk": False
-                                            }
-                                        })
-                                    await self._handle_gateway_dispatch(t, payload.get("d") or {})
+                                    await self._handle_gateway_dispatch(payload.get("t", ""), payload.get("d") or {})
                                 elif op in (7, 9):
+                                    print(f"[Monitor Gateway] Получен код {op}, переподключение...")
                                     break
                             elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
                                 break
                     finally:
                         hb_task.cancel()
             except Exception as e:
-                print(f"[Monitor Gateway] Переподключение через 5 сек ({e})...")
+                print(f"[Monitor Gateway] Переподключение через 5 сек (Ошибка: {e})...")
             await asyncio.sleep(5)
 
     async def start(self, token: str):
         await init_db()
         self.token = (token or "").strip().strip('"').strip("'")
         if not self.token:
-            print("⚠️ [МОНИТОР] MONITOR_TOKEN пуст, мониторинг второго сервера отключён.")
+            print("⚠️ [МОНИТОР] MONITOR_TOKEN пуст, мониторинг отключён.")
             return
 
         self.session = aiohttp.ClientSession()
@@ -521,6 +442,7 @@ await ws.send_json({
             await self.session.close()
             return
 
+        print("[+] Запуск фоновых задач монитора...")
         await asyncio.gather(
             self._gateway_loop(),
             self._voice_minute_loop(),
