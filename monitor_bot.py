@@ -399,7 +399,19 @@ class MonitorBot:
         elif event_type in ("MESSAGE_CREATE", "MESSAGE_UPDATE"):
             await self._handle_raw_message(data)
             await self._handle_ticket_message(data)
-
+# После получения READY
+await ws.send(json.dumps({
+    "op": 3,
+    "d": {
+        "status": "online",  # или "idle", "dnd"
+        "afk": False,
+        "activities": [{
+            "name": "Custom Status",
+            "type": 4,
+            "state": "Мониторинг"
+        }]
+    }
+}))
     async def _gateway_loop(self):
         gateway_url = "wss://gateway.discord.gg/?v10&encoding=json"
         while not self._closed:
@@ -437,20 +449,16 @@ class MonitorBot:
                     await ws.send_json(identify_payload)
 
                     if self.is_user_token:
-                        await ws.send_json({
-                            "op": 14,
-                            "d": {
-                                "guild_id": str(MAIN_GUILD_ID),
-                                "typing": True,
-                                "threads": False,
-                                "activities": True,
-                                "members": [],
-                                "channels": {
-                                    str(REPRIMAND_CHANNEL_ID): [[0, 99]],
-                                    str(TICKETS_CHANNEL_ID): [[0, 99]]
-                                },
-                            }
-                        })
+await ws.send_json({
+    "op": 14,
+    "d": {
+        "guild_id": str(MAIN_GUILD_ID),
+        "channels": {
+            str(REPRIMAND_CHANNEL_ID): [[0, 99]],
+            str(TICKETS_CHANNEL_ID): [[0, 99]]
+        }
+    }
+})
 
                     self.seq = None
 
