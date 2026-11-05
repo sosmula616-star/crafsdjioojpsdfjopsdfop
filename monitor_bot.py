@@ -149,30 +149,24 @@ class MonitorBot:
 
             await asyncio.sleep(60)
 
-    async def _poll_reprimand_channel_loop(self):
+        async def _poll_channels_loop(self):
         await asyncio.sleep(15)
-        url = f"https://discord.com/api/v10/channels/{REPRIMAND_CHANNEL_ID}/messages?limit=10"
+        reprimand_url = f"https://discord.com/api/v10/channels/{REPRIMAND_CHANNEL_ID}/messages?limit=10"
+        tickets_url   = f"https://discord.com/api/v10/channels/{TICKETS_CHANNEL_ID}/messages?limit=10"
         while not self._closed:
             try:
                 if self.session and not self.session.closed:
-                    async with self.session.get(url, headers=self._headers()) as resp:
+                    async with self.session.get(reprimand_url, headers=self._headers()) as resp:
                         if resp.status == 200:
-                            messages = await resp.json()
-                            for msg in reversed(messages):
+                            for msg in reversed(await resp.json()):
                                 await self._handle_raw_message(msg)
+                    async with self.session.get(tickets_url, headers=self._headers()) as resp:
+                        if resp.status == 200:
+                            for msg in reversed(await resp.json()):
+                                await self._handle_ticket_message(msg)
             except Exception:
                 pass
             await asyncio.sleep(30)
-
-    def _extract_raw_embed_text(self, embed: dict) -> str:
-        parts = []
-        if embed.get("title"):
-            parts.append(str(embed["title"]))
-        if embed.get("description"):
-            parts.append(str(embed["description"]))
-        for f in embed.get("fields", []):
-            parts.append(f"{f.get('name', '')}\n{f.get('value', '')}")
-        return "\n".join(parts)
 
     async def _resolve_target_user_from_reprimand(self, text: str) -> int | None:
         mentions = re.findall(r"<@!?(\d{15,21})>", text)
@@ -201,7 +195,83 @@ class MonitorBot:
             except Exception:
                 pass
         return None
+    async def _resolve_user_id_from_text(self, text: str) -> int | None:
+        # 1) прямой mention
+        m = re.search(r"<@!?(\d{15,21})>", text)
+        if m:
+            return int(m.group(1))
 
+        # 2) имя (через кэш участников из GUILD_CREATE / VOICE_STATE_UPDATE)
+        names_to_try = []
+        at_match = re.search(r"@([^\s|]+)", text)
+        if at_match:
+            names_to_try.append(at_match.group(1).strip())
+        pipe_match = re.search(r"\|\s*([^\s#\n]+)", text)
+        if pipe_match:
+            names_to_try.append(pipe_match.group(1).strip())
+
+        for name in names_to_try:
+            name_low = name.lower()
+            if name_low in self.name_to_id:
+                return self.name_to_id[name_low]
+
+            # 3) fallback — поиск по API
+            try:
+                url = (f"https://discord.com/api/v10/guilds/{MAIN_GUILD_ID}"
+                       f"/members/search?query={name}&limit=5")
+                async with self.session.get(url, headers=self._headers()) as resp:
+                    if resp.status == 200:
+                        for m in await resp.json():
+                            self._cache_member_payload(m)
+                            u = m.get("user", {})
+                            if u.get("id"):
+                                return int(u["id"])
+            except Exception:
+                pass
+        return None
+
+    async def _handle_ticket_message(self, msg_data: dict):
+        ch_id = int(msg_data.get("channel_id", 0))
+        if ch_id != TICKETS_CHANNEL_ID:
+            return
+
+        embeds = msg_data.get("embeds") or []
+        if not embeds:
+            return
+
+        msg_id = msg_data.get("id", "0")
+        for embed in embeds:
+            full_text = self._extract_raw_embed_text(embed)
+            if "Тикет был закрыт" not in full_text:
+                continue
+
+            ticket_id_match = re.search(r"ID тикета[:\s]*\n?\s*(\d+)", full_text, re.IGNORECASE)
+            ticket_key = (
+                f"ticket_{ticket_id_match.group(1)}"
+                if ticket_id_match else f"ticket_msg_{msg_id}"
+            )
+
+            accepted_section = ""
+            for f in embed.get("fields", []):
+                if "Тикет принял" in str(f.get("name", "")):
+                    accepted_section = str(f.get("value", ""))
+                    break
+            if not accepted_section:
+                m_sec = re.search(r"Тикет принял[:\s]*\n?(.+)", full_text, re.IGNORECASE)
+                if m_sec:
+                    accepted_section = m_sec.group(1)
+            if not accepted_section:
+                continue
+
+            support_id = await self._resolve_user_id_from_text(accepted_section)
+            if not support_id:
+                continue
+
+            if not await mark_event_processed(ticket_key):
+                return
+
+            new_tickets = await increment_stat(support_id, "tickets", 1)
+            print(f"[Tickets] Закрытый тикет {ticket_key} засчитан саппорту {support_id} (всего: {new_tickets})")
     async def _handle_raw_message(self, msg_data: dict):
         ch_id = int(msg_data.get("channel_id", 0))
         if ch_id != REPRIMAND_CHANNEL_ID:
@@ -302,6 +372,7 @@ class MonitorBot:
 
         elif event_type in ("MESSAGE_CREATE", "MESSAGE_UPDATE"):
             await self._handle_raw_message(data)
+            await self._handle_ticket_message(data)     # <-- добавить
 
     async def _gateway_loop(self):
         gateway_url = "wss://gateway.discord.gg/?v10&encoding=json"
@@ -396,7 +467,7 @@ class MonitorBot:
         await asyncio.gather(
             self._gateway_loop(),
             self._voice_minute_loop(),
-            self._poll_reprimand_channel_loop(),
+            self._poll_channels_loop(),
         )
 
     async def close(self):
