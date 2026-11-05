@@ -10,6 +10,7 @@ from config import (
     CURATOR_ROLE_IDS,
     LOBBY_CHANNELS,
     REPRIMAND_CHANNEL_ID,
+    TICKETS_CHANNEL_ID,          # <-- добавить
     MAX_WARNS
 )
 from database import (
@@ -19,6 +20,7 @@ from database import (
     add_activity_minutes,
     change_warns,
     mark_event_processed,
+    increment_stat,              # <-- добавить
     now_str,
     current_slot_str
 )
