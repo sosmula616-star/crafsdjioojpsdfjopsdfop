@@ -1,336 +1,332 @@
 import io
 import os
-from datetime import datetime
+import urllib.request
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 from config import MAX_WARNS
+from database import now_str
 
-BG_TEMPLATE_PATHS = [
-    "assets/profile_bg.png",
-    "assets/profile_bg.jpg",
-    "assets/profile_bg.webp",
-    "profile_bg.png",
-]
+# 1. Шрифт с фэнтезийным характером (для Ника, Заголовков и Крупных цифр)
+FONT_FANTASY_BOLD = "Philosopher-Bold.ttf"
+FONT_FANTASY_URL = "https://github.com/google/fonts/raw/main/ofl/philosopher/Philosopher-Bold.ttf"
 
-def days_since(date_str: str) -> int:
-    try:
-        dt = datetime.strptime(date_str, "%d.%m.%Y")
-        return max(0, (datetime.now() - dt).days)
-    except Exception:
-        return 0
+# 2. Сверхчеткий UI-шрифт (для мелких подписей и строк статистики)
+FONT_UI_BOLD = "Montserrat-Bold.ttf"
+FONT_UI_URL = "https://github.com/JulietaUla/Montserrat/raw/master/fonts/ttf/Montserrat-Bold.ttf"
 
-def _plural_days(n: int) -> str:
-    n_abs = abs(n) % 100
-    n1 = n_abs % 10
-    if 10 < n_abs < 20:
-        return f"{n} дней"
-    if n1 == 1:
-        return f"{n} день"
-    if 2 <= n1 <= 4:
-        return f"{n} дня"
-    return f"{n} дней"
+FONT_UI_SEMI = "Montserrat-SemiBold.ttf"
+FONT_UI_SEMI_URL = "https://github.com/JulietaUla/Montserrat/raw/master/fonts/ttf/Montserrat-SemiBold.ttf"
 
-def _load_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
-    candidates = []
-    if bold:
-        candidates.extend([
-            "assets/font_bold.ttf",
-            "C:/Windows/Fonts/segoeuib.ttf",
-            "C:/Windows/Fonts/arialbd.ttf",
-            "C:/Windows/Fonts/tahomabd.ttf",
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-            "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-        ])
-    else:
-        candidates.extend([
-            "assets/font_regular.ttf",
-            "C:/Windows/Fonts/segoeui.ttf",
-            "C:/Windows/Fonts/arial.ttf",
-            "C:/Windows/Fonts/tahoma.ttf",
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-        ])
-    for path in candidates:
-        if os.path.exists(path):
+
+def ensure_fonts_sync():
+    """Автоматически скачивает фэнтези и UI шрифты с поддержкой кириллицы."""
+    fonts_to_download = [
+        (FONT_FANTASY_BOLD, FONT_FANTASY_URL),
+        (FONT_UI_BOLD, FONT_UI_URL),
+        (FONT_UI_SEMI, FONT_UI_SEMI_URL),
+    ]
+    for path, url in fonts_to_download:
+        if not os.path.exists(path):
             try:
-                return ImageFont.truetype(path, size)
-            except Exception:
-                pass
+                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=10) as resp, open(path, "wb") as f:
+                    f.write(resp.read())
+                print(f"[+] Шрифт {path} успешно скачан.")
+            except Exception as e:
+                print(f"[!] Не удалось скачать шрифт {path}: {e}")
+
+
+def get_font(path: str, size: int) -> ImageFont.FreeTypeFont:
+    for candidate in [path, FONT_UI_BOLD, "arialbd.ttf", "DejaVuSans-Bold.ttf"]:
+        try:
+            return ImageFont.truetype(candidate, size)
+        except Exception:
+            continue
     return ImageFont.load_default()
 
-def _draw_fitted_text(
+
+def fit_text_to_box(
     draw: ImageDraw.ImageDraw,
-    center_xy: tuple[int, int],
     text: str,
+    font_path: str,
     max_width: int,
-    max_size: int,
-    min_size: int = 13,
-    bold: bool = True,
-    fill=(255, 255, 255, 255),
-    stroke_fill=(25, 10, 45, 220),
-    stroke_width: int = 2
+    start_size: int = 26,
+    min_size: int = 12
+) -> tuple[str, ImageFont.FreeTypeFont]:
+    """
+    Автоматически масштабирует шрифт под длину текста (особенно длинных ников),
+    чтобы текст никогда не выходил за пределы неоновых рамок.
+    """
+    text = str(text or "").strip() or "Unknown"
+    for size in range(start_size, min_size - 1, -1):
+        font = get_font(font_path, size)
+        bbox = draw.textbbox((0, 0), text, font=font, stroke_width=2)
+        if (bbox[2] - bbox[0]) <= max_width:
+            return text, font
+
+    font = get_font(font_path, min_size)
+    while len(text) > 3:
+        text = text[:-1]
+        bbox = draw.textbbox((0, 0), text + "...", font=font, stroke_width=2)
+        if (bbox[2] - bbox[0]) <= max_width:
+            return text + "...", font
+    return text, font
+
+
+def draw_magic_text(
+    text_layer: Image.Image,
+    glow_layer: Image.Image,
+    pos: tuple[int, int],
+    text: str,
+    font: ImageFont.FreeTypeFont,
+    fill: str = "#FFFFFF",
+    glow_color: str = "#A855F7",
+    stroke_color: str = "#120324",
+    stroke_width: int = 2,
+    anchor: str = "mm"
 ):
-    clean_text = text.strip() or "Support"
-    chosen_font = _load_font(min_size, bold=bold)
+    """
+    Двухслойная отрисовка:
+    1) На нижний слой кладется широкий цветной штамп (который потом размывается в мягкий неон).
+    2) На верхний слой кладется идеально четкий текст с темной обводкой (stroke) для 100% читаемости.
+    """
+    glow_draw = ImageDraw.Draw(glow_layer)
+    text_draw = ImageDraw.Draw(text_layer)
 
-    for sz in range(max_size, min_size - 1, -1):
-        font = _load_font(sz, bold=bold)
-        bbox = draw.textbbox((0, 0), clean_text, font=font)
-        w = bbox[2] - bbox[0]
-        if w <= max_width:
-            chosen_font = font
-            break
-    else:
-        while len(clean_text) > 4:
-            clean_text = clean_text[:-1]
-            bbox = draw.textbbox((0, 0), clean_text + "...", font=chosen_font)
-            if (bbox[2] - bbox[0]) <= max_width:
-                clean_text += "..."
-                break
-
-    draw.text(
-        center_xy,
-        clean_text,
-        font=chosen_font,
-        fill=fill,
-        anchor="mm",
-        stroke_width=stroke_width,
-        stroke_fill=stroke_fill
+    # Слой свечения (будет размыт через GaussianBlur)
+    glow_draw.text(
+        pos, str(text), font=font, fill=glow_color,
+        anchor=anchor, stroke_width=stroke_width + 3, stroke_fill=glow_color
+    )
+    # Слой четкого текста с темным контуром
+    text_draw.text(
+        pos, str(text), font=font, fill=fill,
+        anchor=anchor, stroke_width=stroke_width, stroke_fill=stroke_color
     )
 
-def _build_fallback_background(W: int, H: int) -> Image.Image:
-    img = Image.new("RGBA", (W, H), (11, 5, 24, 255))
-    glow = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    g_draw = ImageDraw.Draw(glow)
 
-    g_draw.ellipse((40, 60, 420, 440), fill=(155, 55, 255, 95))
-    g_draw.ellipse((820, -40, 1220, 290), fill=(175, 85, 255, 85))
-    g_draw.ellipse((400, 220, 1250, 720), fill=(115, 30, 210, 70))
-    glow = glow.filter(ImageFilter.GaussianBlur(radius=55))
-    img = Image.alpha_composite(img, glow)
-    draw = ImageDraw.Draw(img)
+def draw_glass_capsule(draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int], radius: int = 14):
+    """Рисует темную полупрозрачную стеклянную капсулу с двойной неоновой гранью."""
+    x1, y1, x2, y2 = box
+    # Глубокая темная подложка (гарантирует, что блики фона не помешают читать текст)
+    draw.rounded_rectangle(
+        box,
+        radius=radius,
+        fill=(11, 4, 24, 205),
+        outline=(175, 95, 255, 160),
+        width=1
+    )
+    # Внутренняя мягкая грань для объема
+    draw.rounded_rectangle(
+        (x1 + 2, y1 + 2, x2 - 2, y2 - 2),
+        radius=max(1, radius - 2),
+        fill=None,
+        outline=(230, 190, 255, 35),
+        width=1
+    )
 
-    def glass_box(xy, radius=20, outline=(165, 90, 255, 235), fill=(22, 10, 44, 210), width_px=2):
-        draw.rounded_rectangle(xy, radius=radius, fill=fill, outline=outline, width=width_px)
 
-    cx, cy, r = 223, 250, 114
-    draw.ellipse((cx - r - 8, cy - r - 8, cx + r + 8, cy + r + 8), outline=(185, 110, 255, 255), width=3)
-    draw.ellipse((cx - r, cy - r, cx + r, cy + r), fill=(15, 7, 30, 240), outline=(140, 75, 235, 220), width=2)
+def find_bg_file() -> str | None:
+    candidates = [
+        "profile_bg.png", "profile_bg.jpg", "profile_bg.webp",
+        "bg.png", "bg.jpg", "background.png", "template.png",
+        "assets/profile_bg.png", "assets/bg.png"
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+    return None
 
-    glass_box((75, 381, 380, 439), radius=18)
-    glass_box((130, 456, 326, 493), radius=15)
-    glass_box((130, 509, 326, 546), radius=15)
 
-    top_boxes = [(415, 206, 622, 330), (634, 206, 842, 330), (854, 206, 1062, 330), (1074, 206, 1245, 330)]
-    for b in top_boxes:
-        glass_box(b, radius=20)
+def generate_profile_image(display_name: str, data: dict, avatar_bytes: bytes | None = None) -> io.BytesIO:
+    ensure_fonts_sync()
+    d = dict(data) if data else {}
 
-    glass_box((415, 355, 1245, 456), radius=22)
-    glass_box((415, 478, 1245, 646), radius=24)
-    return img
-
-def generate_profile_image(username: str, support_data: dict, avatar_bytes: bytes | None = None) -> io.BytesIO:
-    W, H = 1280, 720
-
-    bg_img = None
-    for p in BG_TEMPLATE_PATHS:
-        if os.path.exists(p):
-            try:
-                bg_img = Image.open(p).convert("RGBA").resize((W, H), Image.Resampling.LANCZOS)
-                break
-            except Exception:
-                pass
-
-    if bg_img is None:
-        img = _build_fallback_background(W, H)
+    # 1. Загружаем ваш фон с замком (1408x792)
+    W, H = 1408, 792
+    bg_path = find_bg_file()
+    if bg_path:
+        bg = Image.open(bg_path).convert("RGBA").resize((W, H), Image.Resampling.LANCZOS)
     else:
-        img = bg_img.copy()
+        print("⚠️ [ПРОФИЛЬ] Файл profile_bg.png не найден в корне! Положите картинку в корень проекта.")
+        bg = Image.new("RGBA", (W, H), (18, 7, 35, 255))
 
-    cx, cy, av_r = 223, 250, 108
-    av_diam = av_r * 2
+    # 2. Загружаем и вписываем аватарку в магическое кольцо
+    avatar_size = 240
+    avatar_img = None
     if avatar_bytes:
         try:
-            av = Image.open(io.BytesIO(avatar_bytes)).convert("RGBA").resize((av_diam, av_diam), Image.Resampling.LANCZOS)
-            mask = Image.new("L", (av_diam, av_diam), 0)
-            ImageDraw.Draw(mask).ellipse((0, 0, av_diam, av_diam), fill=255)
-            img.paste(av, (cx - av_r, cy - av_r), mask)
+            avatar_img = Image.open(io.BytesIO(avatar_bytes)).convert("RGBA")
         except Exception:
             pass
 
-    overlay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    odraw = ImageDraw.Draw(overlay)
+    if avatar_img is None:
+        avatar_img = Image.new("RGBA", (avatar_size, avatar_size), (60, 25, 110, 255))
+    else:
+        avatar_img = avatar_img.resize((avatar_size, avatar_size), Image.Resampling.LANCZOS)
 
-    dot_color = (250, 175, 60, 255) if support_data.get("vacation_until") else (165, 95, 255, 255)
-    odraw.ellipse((306, 303, 332, 329), fill=dot_color)
+    mask = Image.new("L", (avatar_size, avatar_size), 0)
+    mask_draw = ImageDraw.Draw(mask)
+    mask_draw.ellipse((0, 0, avatar_size, avatar_size), fill=255)
 
-    _draw_fitted_text(
-        odraw,
-        center_xy=(227, 410),
-        text=username,
-        max_width=278,
-        max_size=28,
-        min_size=14,
-        bold=True,
-        fill=(255, 255, 255, 255)
+    # Вырезаем на маске место под малое кольцо статуса (X: 349, Y: 363)
+    rel_status_x = 349 - (246 - avatar_size // 2)
+    rel_status_y = 363 - (281 - avatar_size // 2)
+    mask_draw.ellipse(
+        (rel_status_x - 32, rel_status_y - 32, rel_status_x + 32, rel_status_y + 32),
+        fill=0
     )
 
-    pt_val = support_data.get("prime_time") or "ПТ не назначен"
-    _draw_fitted_text(
-        odraw,
-        center_xy=(228, 474),
-        text=f"ПТ: {pt_val}" if support_data.get("prime_time") else "ПТ не назначен",
-        max_width=180,
-        max_size=17,
-        min_size=12,
-        bold=True,
-        fill=(235, 215, 255, 255)
+    bg.paste(avatar_img, (246 - avatar_size // 2, 281 - avatar_size // 2), mask)
+
+    # Создаем слои:
+    # - ui_layer: для полупрозрачных капсул
+    # - glow_layer: для размытого неонового свечения вокруг букв
+    # - text_layer: для идеально четкого текста поверх свечения
+    ui_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    glow_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    text_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+
+    ui_draw = ImageDraw.Draw(ui_layer)
+
+    # Светящаяся кристаллическая сфера в кольце статуса
+    ui_draw.ellipse((349 - 18, 363 - 18, 349 + 18, 363 + 18), fill=(185, 105, 255, 255))
+    ui_draw.ellipse((349 - 10, 363 - 12, 349 - 2, 363 - 4), fill=(245, 230, 255, 210))  # Блик
+
+    # 3. Данные из БД
+    prime_time = d.get("prime_time") or "Не назначен"
+    date_val = d.get("joined_at") or d.get("created_at") or now_str()
+
+    balance = d.get("balance", d.get("tokens", 0))
+    tickets = d.get("tickets", d.get("closed_tickets", 0))
+    vacation = d.get("vacation_until") or "Нет"
+    warns = d.get("warns", 0)
+    warns_str = f"{warns} / {MAX_WARNS}"
+
+    primes_done = d.get("primes_done", d.get("completed_primes", d.get("pt_done", 0)))
+    swaps_taken = d.get("swaps_taken", 0)
+
+    admits = d.get("admits", d.get("verifications", d.get("passes", 0)))
+    misses = d.get("misses", d.get("absences", 0))
+    extra_pts = d.get("extra_primes", d.get("extra_pt", 0))
+    total_mins = d.get("total_minutes", d.get("voice_minutes", d.get("minutes", 0)))
+
+    # 4. Палитра и шрифты
+    COLOR_PURE_WHITE = "#FFFFFF"         # Чистый белый для цифр и ника
+    COLOR_CRYSTAL_LAVENDER = "#F3E8FF"   # Очень светлый лавандовый (почти белый, но с оттенком магии) для подписей
+    COLOR_HEADER_GOLD_LILAC = "#E9D5FF"  # Светло-сиреневый для заголовков секций
+    GLOW_PURPLE = "#9333EA"              # Насыщенный неон для ореола
+    GLOW_BRIGHT = "#C084FC"              # Яркий неон для главных цифр
+    STROKE_DARK = "#0F0322"              # Чернильно-темный контур для 100% читаемости
+
+    f_sec_title = get_font(FONT_FANTASY_BOLD, 19)
+    f_row_label = get_font(FONT_UI_SEMI, 16)
+    f_row_val = get_font(FONT_FANTASY_BOLD, 21)
+
+    # =========================================================================
+    # ЛЕВАЯ КОЛОНКА (Никнейм фэнтези-шрифтом + ПТ + Дата)
+    # =========================================================================
+    # Подгоняем размер шрифта ника так, чтобы он идеально вошел в плашку (max_width=270px)
+    fitted_name, f_name = fit_text_to_box(
+        ui_draw, display_name, FONT_FANTASY_BOLD, max_width=270, start_size=27, min_size=14
+    )
+    draw_magic_text(
+        text_layer, glow_layer, (249, 453), fitted_name, f_name,
+        fill=COLOR_PURE_WHITE, glow_color=GLOW_BRIGHT, stroke_color=STROKE_DARK, stroke_width=2
     )
 
-    prob_val = support_data.get("probation_until")
-    hire_val = support_data.get("hire_date") or "—"
-    third_pill_text = f"Исп. до {prob_val}" if prob_val else f"С {hire_val}"
-    _draw_fitted_text(
-        odraw,
-        center_xy=(228, 527),
-        text=third_pill_text,
-        max_width=180,
-        max_size=16,
-        min_size=11,
-        bold=True,
-        fill=(215, 190, 250, 255)
+    pt_label = f"ПТ: {prime_time}" if prime_time != "Не назначен" else "ПТ не назначен"
+    fitted_pt, f_pt = fit_text_to_box(
+        ui_draw, pt_label, FONT_UI_BOLD, max_width=182, start_size=16, min_size=11
+    )
+    draw_magic_text(
+        text_layer, glow_layer, (249, 524), fitted_pt, f_pt,
+        fill=COLOR_CRYSTAL_LAVENDER, glow_color=GLOW_PURPLE, stroke_color=STROKE_DARK, stroke_width=2
     )
 
-    tokens = support_data.get("balance", 0)
-    salary_forecast = round(tokens * 0.04, 1)
-    if isinstance(salary_forecast, float) and salary_forecast.is_integer():
-        salary_forecast = int(salary_forecast)
-    vacation_str = f"До {support_data['vacation_until']}" if support_data.get("vacation_until") else "Нет"
-    warns_count = min(MAX_WARNS, max(0, int(support_data.get("warns", 0))))
-    warns_str = f"{warns_count} / {MAX_WARNS}"
+    fitted_date, f_date = fit_text_to_box(
+        ui_draw, str(date_val), FONT_UI_BOLD, max_width=182, start_size=16, min_size=11
+    )
+    draw_magic_text(
+        text_layer, glow_layer, (249, 581), fitted_date, f_date,
+        fill=COLOR_PURE_WHITE, glow_color=GLOW_PURPLE, stroke_color=STROKE_DARK, stroke_width=2
+    )
 
-    top_cards_info = [
-        ((415, 206, 622, 330), "Токены", str(tokens), (255, 235, 255, 255)),
-        ((634, 206, 842, 330), "Прогноз зарплаты", str(salary_forecast), (255, 235, 255, 255)),
-        ((854, 206, 1062, 330), "Отпуск", vacation_str, (255, 235, 255, 255)),
-        ((1074, 206, 1245, 330), "Выговоры", warns_str, (255, 120, 145, 255) if warns_count > 0 else (255, 235, 255, 255)),
+    # =========================================================================
+    # ПРАВАЯ КОЛОНКА — РЯД 1: 4 верхних окошка
+    # =========================================================================
+    top_cards = [
+        (569, "ТОКЕНЫ", str(balance)),
+        (796, "ЗАКРЫТЫЕ ТИКЕТЫ", str(tickets)),
+        (1024, "ОТПУСК", str(vacation)),
+        (1252, "ВЫГОВОРЫ", warns_str),
     ]
+    for cx, title, val in top_cards:
+        draw_glass_capsule(ui_draw, (cx - 84, 290, cx + 84, 344), radius=14)
+        t_txt, t_font = fit_text_to_box(ui_draw, title, FONT_UI_BOLD, max_width=185, start_size=14, min_size=10)
+        v_txt, v_font = fit_text_to_box(ui_draw, val, FONT_FANTASY_BOLD, max_width=152, start_size=27, min_size=14)
 
-    font_card_title = _load_font(16, bold=True)
-    for (x1, y1, x2, y2), title, val, val_color in top_cards_info:
-        mid_x = (x1 + x2) // 2
-        odraw.text(
-            (mid_x, y1 + 32),
-            title,
-            font=font_card_title,
-            fill=(220, 195, 255, 255),
-            anchor="mm",
-            stroke_width=2,
-            stroke_fill=(20, 8, 40, 220)
+        draw_magic_text(
+            text_layer, glow_layer, (cx, 264), t_txt, t_font,
+            fill=COLOR_HEADER_GOLD_LILAC, glow_color=GLOW_PURPLE, stroke_color=STROKE_DARK, stroke_width=2
         )
-        pill_x1, pill_y1, pill_x2, pill_y2 = x1 + 14, y1 + 58, x2 - 14, y2 - 14
-        odraw.rounded_rectangle(
-            (pill_x1, pill_y1, pill_x2, pill_y2),
-            radius=13,
-            fill=(30, 12, 58, 175),
-            outline=(170, 95, 255, 190),
-            width=1
-        )
-        _draw_fitted_text(
-            odraw,
-            center_xy=(mid_x, (pill_y1 + pill_y2) // 2),
-            text=val,
-            max_width=(pill_x2 - pill_x1 - 14),
-            max_size=26,
-            min_size=14,
-            bold=True,
-            fill=val_color
+        draw_magic_text(
+            text_layer, glow_layer, (cx, 317), v_txt, v_font,
+            fill=COLOR_PURE_WHITE, glow_color=GLOW_BRIGHT, stroke_color=STROKE_DARK, stroke_width=2
         )
 
-    font_sec_title = _load_font(20, bold=True)
-    odraw.text(
-        (830, 376),
-        "✦  Статистика саппорта  ✦",
-        font=font_sec_title,
-        fill=(245, 225, 255, 255),
-        anchor="mm",
-        stroke_width=2,
-        stroke_fill=(20, 8, 40, 230)
+    # =========================================================================
+    # ПРАВАЯ КОЛОНКА — РЯД 2: Средняя широкая панель
+    # =========================================================================
+    draw_magic_text(
+        text_layer, glow_layer, (910, 417), "✦ СТАТИСТИКА ПРАЙМ-ТАЙМОВ ✦", f_sec_title,
+        fill=COLOR_HEADER_GOLD_LILAC, glow_color=GLOW_BRIGHT, stroke_color=STROKE_DARK, stroke_width=2
     )
-
-    total_days_str = _plural_days(days_since(support_data.get("hire_date", "")))
-    total_mins_str = f"{support_data.get('total_minutes', 0):,}".replace(",", " ")
-
     mid_pills = [
-        ((435, 396, 820, 444), "Всего на саппорте", f"{total_days_str} ✦"),
-        ((840, 396, 1225, 444), "Всего минут в прихожих", f"{total_mins_str} ✦"),
+        (476, 438, 895, 488, "Выполнено ПТ", f"{primes_done} дн."),
+        (925, 438, 1344, 488, "Принято замен", f"{swaps_taken} шт."),
     ]
-    font_stat_lbl = _load_font(17, bold=True)
-    for (px1, py1, px2, py2), lbl, val in mid_pills:
-        odraw.rounded_rectangle(
-            (px1, py1, px2, py2),
-            radius=14,
-            fill=(34, 14, 65, 185),
-            outline=(175, 100, 255, 200),
-            width=1
+    for x1, y1, x2, y2, label, val in mid_pills:
+        draw_glass_capsule(ui_draw, (x1, y1, x2, y2), radius=14)
+        cy = (y1 + y2) // 2
+        draw_magic_text(
+            text_layer, glow_layer, (x1 + 22, cy), label, f_row_label,
+            fill=COLOR_CRYSTAL_LAVENDER, glow_color=GLOW_PURPLE, stroke_color=STROKE_DARK, stroke_width=2, anchor="lm"
         )
-        ym = (py1 + py2) // 2
-        odraw.text(
-            (px1 + 20, ym),
-            lbl,
-            font=font_stat_lbl,
-            fill=(230, 210, 255, 255),
-            anchor="lm",
-            stroke_width=1,
-            stroke_fill=(15, 5, 30, 200)
-        )
-        _draw_fitted_text(
-            odraw,
-            center_xy=(px2 - 65, ym),
-            text=val,
-            max_width=130,
-            max_size=21,
-            min_size=14,
-            bold=True,
-            fill=(255, 255, 255, 255)
+        draw_magic_text(
+            text_layer, glow_layer, (x2 - 22, cy), val, f_row_val,
+            fill=COLOR_PURE_WHITE, glow_color=GLOW_BRIGHT, stroke_color=STROKE_DARK, stroke_width=2, anchor="rm"
         )
 
-    bottom_stats = [
-        ((435, 496, 820, 554), "Допусков", f"{support_data.get('admitted', 0)} ✦"),
-        ((840, 496, 1225, 554), "Недопусков", f"{support_data.get('rejected', 0)} ✦"),
-        ((435, 570, 820, 628), "Принятых замен", f"{support_data.get('swaps_taken', 0)} ✦"),
-        ((840, 570, 1225, 628), "Обработано тикетов", f"{support_data.get('tickets', 0)} ✦"),
+    # =========================================================================
+    # ПРАВАЯ КОЛОНКА — РЯД 3: Нижняя большая панель (4 капсулы)
+    # =========================================================================
+    bottom_slots = [
+        (476, 548, 895, 602, "Допусков в прихожей", f"{admits} чел."),
+        (925, 548, 1344, 602, "Прогулы ПТ", f"{misses} дн."),
+        (476, 622, 895, 676, "Дополнительные ПТ", f"{extra_pts} шт."),
+        (925, 622, 1344, 676, "Онлайн в лобби", f"{total_mins} мин."),
     ]
-
-    for (bx1, by1, bx2, by2), lbl, val in bottom_stats:
-        odraw.rounded_rectangle(
-            (bx1, by1, bx2, by2),
-            radius=15,
-            fill=(34, 14, 65, 185),
-            outline=(175, 100, 255, 205),
-            width=1
+    for x1, y1, x2, y2, label, val in bottom_slots:
+        draw_glass_capsule(ui_draw, (x1, y1, x2, y2), radius=14)
+        cy = (y1 + y2) // 2
+        draw_magic_text(
+            text_layer, glow_layer, (x1 + 22, cy), label, f_row_label,
+            fill=COLOR_CRYSTAL_LAVENDER, glow_color=GLOW_PURPLE, stroke_color=STROKE_DARK, stroke_width=2, anchor="lm"
         )
-        ym = (by1 + by2) // 2
-        odraw.text(
-            (bx1 + 22, ym),
-            lbl,
-            font=font_stat_lbl,
-            fill=(230, 210, 255, 255),
-            anchor="lm",
-            stroke_width=1,
-            stroke_fill=(15, 5, 30, 200)
-        )
-        _draw_fitted_text(
-            odraw,
-            center_xy=(bx2 - 65, ym),
-            text=val,
-            max_width=125,
-            max_size=23,
-            min_size=14,
-            bold=True,
-            fill=(255, 255, 255, 255)
+        draw_magic_text(
+            text_layer, glow_layer, (x2 - 22, cy), val, f_row_val,
+            fill=COLOR_PURE_WHITE, glow_color=GLOW_BRIGHT, stroke_color=STROKE_DARK, stroke_width=2, anchor="rm"
         )
 
-    img = Image.alpha_composite(img, overlay)
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    buf.seek(0)
-    return buf
+    # Размываем слой свечения для настоящего мягкого неона
+    glow_blurred = glow_layer.filter(ImageFilter.GaussianBlur(radius=4))
+
+    # Собираем все слои в финальную картинку
+    final_img = Image.alpha_composite(bg, ui_layer)
+    final_img = Image.alpha_composite(final_img, glow_blurred)
+    final_img = Image.alpha_composite(final_img, text_layer).convert("RGB")
+
+    output = io.BytesIO()
+    final_img.save(output, format="PNG", optimize=True)
+    output.seek(0)
+    return output
