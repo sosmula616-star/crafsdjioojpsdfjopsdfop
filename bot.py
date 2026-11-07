@@ -19,6 +19,7 @@ EXTENSIONS = (
     "cogs.bridge",
 )
 
+
 class MitaSupportBot(commands.Bot):
     def __init__(self):
         super().__init__(command_prefix="!", intents=INTENTS)
@@ -65,6 +66,7 @@ class MitaSupportBot(commands.Bot):
 
 bot = MitaSupportBot()
 
+
 @bot.tree.command(name="help", description="Список всех команд бота")
 async def help_cmd(interaction: discord.Interaction):
     if not await can_use_support_commands(interaction):
@@ -106,7 +108,10 @@ async def main():
             await bot.start(clean_token)
         except discord.LoginFailure:
             print("❌ [ОШИБКА] Неверный токен ОСНОВНОГО бота (DISCORD_TOKEN)! Проверьте .env")
-            await bot.close()
+        finally:
+            await monitor.close()
+            if not bot.is_closed():
+                await bot.close()
 
     async def start_monitor_client():
         try:
@@ -114,10 +119,14 @@ async def main():
         except Exception as e:
             print(f"❌ [ОШИБКА МОНИТОРА]: {e}")
 
-    await asyncio.gather(
-        start_main_bot(),
-        start_monitor_client(),
-    )
+    try:
+        await asyncio.gather(
+            start_main_bot(),
+            start_monitor_client(),
+        )
+    finally:
+        await monitor.close()
+
 
 if __name__ == "__main__":
     asyncio.run(main())
